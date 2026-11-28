@@ -7,10 +7,13 @@ import type {
   OrchestrationEvent,
   OrchestrationReadModel,
   OrchestrationThread,
+  ProviderInteractionMode,
   ProviderPrioritySessionBinding,
   ThreadProvenance,
 } from "@cafecode/contracts";
 import {
+  DEFAULT_RUNTIME_MODE,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
   MAX_LIVE_THREAD_GROUPS_PER_OWNER,
   MAX_THREAD_GROUP_DEPTH,
   defaultThreadOriginClassification,
@@ -56,6 +59,12 @@ import {
   makeNativeMcpQuestionResolutionItems,
   type McpQuestionResolutionItem,
 } from "./mcpQuestionNotice.ts";
+
+const RETIRED_CHAT_WORKFLOW = "This chat uses Full access without a selectable workflow.";
+
+function requestsRetiredChatWorkflow(mode: ProviderInteractionMode): boolean {
+  return mode === "plan" || mode === "auto";
+}
 
 const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
@@ -455,8 +464,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.codexContextWindowOverride !== undefined
             ? { codexContextWindowOverride: command.codexContextWindowOverride }
             : {}),
-          runtimeMode: command.runtimeMode,
-          interactionMode: command.interactionMode,
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           branch: command.branch,
           worktreePath: command.worktreePath,
           ...(command.groupId !== undefined ? { groupId: command.groupId } : {}),
@@ -507,8 +516,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ...(sourceThread.codexContextWindowOverride !== undefined
               ? { codexContextWindowOverride: sourceThread.codexContextWindowOverride }
               : {}),
-            runtimeMode: sourceThread.runtimeMode,
-            interactionMode: sourceThread.interactionMode,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             branch: sourceThread.branch,
             worktreePath: sourceThread.worktreePath,
             // A copy is top level and owns no groups: membership is never
@@ -630,14 +639,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             projectId: sourceThread.projectId,
             title: command.title,
             modelSelection: sourceThread.modelSelection,
-            runtimeMode: sourceThread.runtimeMode,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
             ...(sourceThread.subagentLimits !== undefined
               ? { subagentLimits: sourceThread.subagentLimits }
               : {}),
             ...(sourceThread.codexContextWindowOverride !== undefined
               ? { codexContextWindowOverride: sourceThread.codexContextWindowOverride }
               : {}),
-            interactionMode: sourceThread.interactionMode,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             branch: sourceThread.branch,
             worktreePath: sourceThread.worktreePath,
             ...(sourceThread.description ? { description: sourceThread.description } : {}),
@@ -1143,6 +1152,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.runtimeMode !== DEFAULT_RUNTIME_MODE) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Full access is the only chat access policy.",
+        });
+      }
       const occurredAt = yield* nowIso;
       return {
         ...withEventBase({
@@ -1166,6 +1181,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (requestsRetiredChatWorkflow(command.interactionMode)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: RETIRED_CHAT_WORKFLOW,
+        });
+      }
       const occurredAt = yield* nowIso;
       return {
         ...withEventBase({
@@ -1177,7 +1198,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.interaction-mode-set",
         payload: {
           threadId: command.threadId,
-          interactionMode: command.interactionMode,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           updatedAt: occurredAt,
         },
       };
@@ -1295,6 +1316,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             detail: "Runtime recovery no longer matches the verified terminal turn.",
           });
         }
+      }
+      if (requestsRetiredChatWorkflow(command.interactionMode)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: RETIRED_CHAT_WORKFLOW,
+        });
       }
       const boundProviderInstanceId =
         targetThread.session?.providerInstanceId ?? targetThread.session?.providerName;
@@ -1531,7 +1558,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,
-          interactionMode: targetThread.interactionMode,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
           ...(command.runtimeRecovery !== undefined
             ? { runtimeRecovery: command.runtimeRecovery }
@@ -1658,7 +1685,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             messageId: command.message.messageId,
             modelSelection: targetThread.modelSelection,
             runtimeMode: targetThread.runtimeMode,
-            interactionMode: targetThread.interactionMode,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             ...(command.terminalRecovery !== undefined
               ? { terminalSteerRecovery: command.terminalRecovery }
               : {}),

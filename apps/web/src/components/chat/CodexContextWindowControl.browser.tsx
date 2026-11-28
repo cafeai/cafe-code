@@ -1,6 +1,5 @@
 import "../../index.css";
 import { useState } from "react";
-import { ProviderDriverKind } from "@cafecode/contracts";
 import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,16 +40,8 @@ function Harness(props: {
     <>
       <CompactComposerControlsMenu
         showPlanSidebar={false}
-        provider={ProviderDriverKind.make(provider)}
-        interactionMode="default"
-        planSidebarLabel="Plan"
         planSidebarOpen={false}
-        runtimeMode="approval-required"
-        showInteractionModeToggle
-        onToggleInteractionMode={() => {}}
-        onNativePermissionModeChange={() => {}}
         onTogglePlanSidebar={() => {}}
-        onRuntimeModeChange={() => {}}
         subagentConcurrencyControl={<MenuItem>Subagent limit…</MenuItem>}
         codexContextWindowControl={
           provider === "codex" ? (
@@ -107,18 +98,19 @@ describe("Codex context-window editor", () => {
     setUiLocale(originalLocale);
   });
 
-  it("places context after Subagent limit and before Mode, and hides it for other providers", async () => {
+  it("shows context with other Codex controls and hides it for other providers", async () => {
     mounted = await render(<Harness onChange={async () => {}} />);
     await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-    const menu = page.getByRole("menu").element();
-    const labels = menu.textContent!;
-    expect(labels.indexOf("Subagent limit…")).toBeLessThan(labels.indexOf("Context window…"));
-    expect(labels.indexOf("Context window…")).toBeLessThan(labels.indexOf("Mode"));
+    const menu = page.getByRole("menu");
+    await expect.element(menu.getByRole("menuitem", { name: "Subagent limit…" })).toBeVisible();
+    await expect.element(menu.getByRole("menuitem", { name: "Context window…" })).toBeVisible();
     await userEvent.keyboard("{Escape}");
+    await expect.element(menu).not.toBeInTheDocument();
     await mounted.rerender(<Harness provider="claudeAgent" onChange={async () => {}} />);
     await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+    await expect.element(menu.getByRole("menuitem", { name: "Subagent limit…" })).toBeVisible();
     await expect
-      .element(page.getByRole("menuitem", { name: "Context window…", exact: true }))
+      .element(menu.getByRole("menuitem", { name: "Context window…" }))
       .not.toBeInTheDocument();
   });
 

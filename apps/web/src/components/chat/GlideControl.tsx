@@ -297,7 +297,7 @@ export function GlideControl({
             )
           : uiText("Computer use requires the macOS desktop app.", undefined, undefined, locale)
         : runtimeMode !== "full-access"
-          ? uiText("Select Full access to enable computer use.", undefined, undefined, locale)
+          ? uiText("Computer use requires Full access.", undefined, undefined, locale)
           : status && !granted
             ? uiText(
                 "macOS permissions are needed. Click to set up computer use.",

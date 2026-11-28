@@ -156,6 +156,7 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<"authenticated" | "started", TError>;
   readonly loginDeviceCode?: <SessionError>(
     hasOwnedSessions: Effect.Effect<boolean, SessionError>,
+    options?: { readonly forceLogin?: boolean },
   ) => Stream.Stream<ServerProviderDeviceLoginEvent, TError>;
   readonly submitLoginCode?: (input: {
     readonly loginId: string;

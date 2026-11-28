@@ -5794,9 +5794,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               issue: "Subagent concurrency must be an integer between 1 and 64.",
             }),
         });
+        const upgradesChatAccess =
+          existing !== undefined &&
+          existing.startInput.runtimeMode !== "full-access" &&
+          input.runtimeMode === "full-access";
         if (
           input.requireIdleForSubagentLimitChange ||
-          input.requireIdleForCodexContextWindowChange
+          input.requireIdleForCodexContextWindowChange ||
+          upgradesChatAccess
         ) {
           if (
             (input.requireIdleForSubagentLimitChange &&
@@ -5812,7 +5817,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               method: "session/reconfigure",
               remoteErrorTag: input.requireIdleForCodexContextWindowChange
                 ? "codex-context-window-active"
-                : "subagent-concurrency-active",
+                : input.requireIdleForSubagentLimitChange
+                  ? "subagent-concurrency-active"
+                  : "chat-access-upgrade-active",
               detail:
                 "Provider configuration cannot change while provider work is active or uncertain.",
             });

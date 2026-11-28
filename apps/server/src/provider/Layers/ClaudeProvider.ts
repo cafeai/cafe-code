@@ -50,7 +50,6 @@ import claudeModelCatalog from "./ClaudeModelCatalog.json" with { type: "json" }
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
 const CLAUDE_PRESENTATION = {
   displayName: "Claude",
-  showInteractionModeToggle: true,
 } as const;
 
 interface VersionedClaudeModel extends ServerProviderModel {

@@ -50,8 +50,6 @@ const emptyDraft: ComposerThreadDraftState = {
   persistedAttachments: [],
   modelSelectionByProvider: {},
   activeProvider: ACCOUNT,
-  runtimeMode: "approval-required",
-  interactionMode: "default",
 };
 
 describe("Claude response-limit continuation admission", () => {

@@ -232,6 +232,9 @@ function normalizeToolCallStatus(
     case "completed":
       return "completed";
     case "failed":
+    case "error":
+    case "cancelled":
+    case "canceled":
       return "failed";
     default:
       return fallback;

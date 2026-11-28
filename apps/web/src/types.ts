@@ -27,7 +27,7 @@ import type {
 } from "@cafecode/contracts";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
-export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+export { DEFAULT_RUNTIME_MODE } from "@cafecode/contracts";
 
 export const DEFAULT_INTERACTION_MODE: ProviderInteractionMode = "default";
 export type ProjectScript = ContractProjectScript;

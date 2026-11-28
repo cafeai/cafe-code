@@ -1,0 +1,70 @@
+diff --git a/index.mjs b/index.mjs
+index 7ad811ceb4015ab48c02b7f22894afdd823cedb1..627e4a8e930f1611d7836f2632dd2b53003d715b 100644
+--- a/index.mjs
++++ b/index.mjs
+@@ -23,10 +23,6 @@ const intersections = new WeakMap();
+  * A map of existing mutation observers used to track element movements.
+  */
+ const mutationObservers = new WeakMap();
+-/**
+- * Intervals for automatically checking the position of elements occasionally.
+- */
+-const intervals = new WeakMap();
+ /**
+  * The configuration options for each group of elements.
+  */
+@@ -163,19 +159,6 @@ function updateAllPos() {
+         parents.forEach((parent) => forEach(parent, (el) => lowPriority(() => updatePos(el))));
+     }, 100));
+ }
+-/**
+- * Its possible for a quick scroll or other fast events to get past the
+- * intersection observer, so occasionally we need want "cold-poll" for the
+- * latests and greatest position. We try to do this in the most non-disruptive
+- * fashion possible. First we only do this ever couple seconds, staggard by a
+- * random offset.
+- * @param el - Element
+- */
+-function poll(el) {
+-    setTimeout(() => {
+-        intervals.set(el, setInterval(() => lowPriority(updatePos.bind(null, el)), 2000));
+-    }, Math.round(2000 * Math.random()));
+-}
+ /**
+  * Perform some operation that is non critical at some point.
+  * @param callback
+@@ -726,7 +709,9 @@ function autoAnimate(el, config = {}) {
+             if (getComputedStyle(el).position === "static") {
+                 Object.assign(el.style, { position: "relative" });
+             }
+-            forEach(el, updatePos, poll, (element) => resize === null || resize === void 0 ? void 0 : resize.observe(element));
++            // Cafe tracks layout through resize, intersection and child-list
++            // changes. Per-element polling reads every row even in idle lists.
++            forEach(el, updatePos, (element) => resize === null || resize === void 0 ? void 0 : resize.observe(element));
+             if (isPlugin(config)) {
+                 options.set(el, config);
+             }
+@@ -762,10 +747,6 @@ function autoAnimate(el, config = {}) {
+                 if (d)
+                     clearTimeout(d);
+                 debounces.delete(node);
+-                const i = intervals.get(node);
+-                if (i)
+-                    clearInterval(i);
+-                intervals.delete(node);
+             });
+         },
+         isEnabled: () => enabled.has(el),
+@@ -790,11 +771,7 @@ function autoAnimate(el, config = {}) {
+                 const io = intersections.get(node);
+                 io === null || io === void 0 ? void 0 : io.disconnect();
+                 intersections.delete(node);
+-                // clear intervals and debounces
+-                const i = intervals.get(node);
+-                if (i)
+-                    clearInterval(i);
+-                intervals.delete(node);
++                // clear debounces
+                 const d = debounces.get(node);
+                 if (d)
+                     clearTimeout(d);

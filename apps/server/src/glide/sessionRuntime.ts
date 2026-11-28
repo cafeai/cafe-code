@@ -917,7 +917,7 @@ export function makeGlideSessionRuntime(options: {
           message: !available
             ? "Install a supported OpenAI desktop runtime and its Computer Use component."
             : !policy.fullAccess
-              ? "Select Full access to use Glide."
+              ? "Glide requires Full access for this chat."
               : !binding?.active
                 ? "Glide connects when this chat next starts a provider session."
                 : "Background desktop control",

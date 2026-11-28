@@ -1,11 +1,13 @@
 import {
   isCodexNativeRetryWarningPayload,
   ApprovalRequestId,
+  DEFAULT_RUNTIME_MODE,
   type ChatAttachment,
   type OrchestrationEvent,
   type ThreadForkMessageCutoff,
   type MessageId,
   RuntimeSubagentPresentation,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
   ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
@@ -1154,8 +1156,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.codexContextWindowOverride !== undefined
               ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
               : {}),
-            runtimeMode: event.payload.runtimeMode,
-            interactionMode: event.payload.interactionMode,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             branch: event.payload.branch,
             worktreePath: event.payload.worktreePath,
             latestTurnId: null,
@@ -1314,7 +1316,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            runtimeMode: event.payload.runtimeMode,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
             updatedAt: event.payload.updatedAt,
           });
           return;
@@ -1329,7 +1331,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            interactionMode: event.payload.interactionMode,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             updatedAt: event.payload.updatedAt,
           });
           return;
@@ -1354,8 +1356,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.codexContextWindowOverride !== undefined
               ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
               : {}),
-            runtimeMode: event.payload.runtimeMode,
-            interactionMode: event.payload.interactionMode,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             updatedAt: maxIso(existingRow.value.updatedAt, event.payload.createdAt),
           });
           return;
@@ -2104,7 +2106,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           providerInstanceId: Option.isSome(existingSession)
             ? existingSession.value.providerInstanceId
             : null,
-          runtimeMode: event.payload.runtimeMode,
+          runtimeMode: Option.isSome(existingSession)
+            ? existingSession.value.runtimeMode
+            : event.payload.runtimeMode,
           ...(Option.isSome(existingSession) &&
           existingSession.value.subagentRuntimeId !== undefined
             ? { subagentRuntimeId: existingSession.value.subagentRuntimeId }

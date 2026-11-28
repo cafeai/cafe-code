@@ -3973,4 +3973,75 @@ describe("incremental orchestration updates", () => {
       expect(retained.some((activity) => activity.id === "subagent-cardinality-00000")).toBe(false);
     },
   );
+
+  it("closes streaming assistant messages on terminal session-set and turn-interrupt events", () => {
+    const turnId = TurnId.make("turn-stream-terminal");
+    const baseThread = makeThread({
+      session: {
+        provider: ProviderDriverKind.make("gemini"),
+        providerInstanceId: ProviderInstanceId.make("gemini"),
+        status: "running",
+        orchestrationStatus: "running",
+        activeTurnId: turnId,
+        createdAt: "2026-02-27T00:00:00.000Z",
+        updatedAt: "2026-02-27T00:00:01.000Z",
+      },
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:00.000Z",
+        startedAt: "2026-02-27T00:00:00.000Z",
+        completedAt: null,
+        assistantMessageId: MessageId.make("msg-assistant-streaming"),
+      },
+      messages: [
+        {
+          id: MessageId.make("msg-assistant-streaming"),
+          role: "assistant",
+          text: "Partial streamed reply",
+          turnId,
+          createdAt: "2026-02-27T00:00:01.000Z",
+          streaming: true,
+        },
+      ],
+    });
+
+    const afterSessionReady = applyOrchestrationEvent(
+      makeState(baseThread),
+      makeEvent("thread.session-set", {
+        threadId: baseThread.id,
+        session: {
+          threadId: baseThread.id,
+          status: "ready",
+          providerName: "gemini",
+          providerInstanceId: ProviderInstanceId.make("gemini"),
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-02-27T00:00:05.000Z",
+        },
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(afterSessionReady)[0]?.messages[0]).toMatchObject({
+      id: MessageId.make("msg-assistant-streaming"),
+      streaming: false,
+      completedAt: "2026-02-27T00:00:05.000Z",
+    });
+
+    const afterInterrupt = applyOrchestrationEvent(
+      makeState(baseThread),
+      makeEvent("thread.turn-interrupt-requested", {
+        threadId: baseThread.id,
+        turnId,
+        createdAt: "2026-02-27T00:00:06.000Z",
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(afterInterrupt)[0]?.messages[0]).toMatchObject({
+      id: MessageId.make("msg-assistant-streaming"),
+      streaming: false,
+      completedAt: "2026-02-27T00:00:06.000Z",
+    });
+  });
 });

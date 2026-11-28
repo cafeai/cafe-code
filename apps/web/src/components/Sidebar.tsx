@@ -22,7 +22,6 @@ import {
 } from "./ThreadStatusIndicators";
 import { SegmentedControl } from "./ui/segmented-control";
 import { ProjectFavicon } from "./ProjectFavicon";
-import { autoAnimate } from "@formkit/auto-animate";
 import React, {
   Fragment,
   useCallback,
@@ -242,6 +241,7 @@ import {
   SidebarThreadGroups,
   type SidebarThreadGroupContextValue,
 } from "./sidebar/SidebarThreadGroups";
+import { attachSidebarListAnimation } from "./sidebar/sidebarListAnimation";
 import {
   buildSidebarThreadGroupIndex,
   sidebarRootThreadKey,
@@ -288,10 +288,6 @@ const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
     return uiText("Created at");
   },
 };
-const SIDEBAR_LIST_ANIMATION_OPTIONS = {
-  duration: 180,
-  easing: "ease-out",
-} as const;
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
 const PATH_SEPARATOR_REGEX = /[/\\]+/g;
 
@@ -1364,13 +1360,6 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
     },
     [confirmThreadDelete, deleteThread, removeFromSelection, rowsByKey, uiLocale],
   );
-  // Same list motion as project chat lists (docs/style-guide.md §8).
-  const animatedListRef = useRef<HTMLElement | null>(null);
-  const attachListAutoAnimate = useCallback((node: HTMLElement | null) => {
-    if (!node || animatedListRef.current === node) return;
-    autoAnimate(node, SIDEBAR_LIST_ANIMATION_OPTIONS);
-    animatedListRef.current = node;
-  }, []);
   // Standalone chats have no workspace PR action. Supplying this boundary to
   // the shared row keeps accidental imported branch data from launching links.
   const ignorePrLink = useCallback((event: React.MouseEvent<HTMLElement>) => {
@@ -1440,7 +1429,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
       {/* The list owns the gap below the heading, so a collapsed, empty
           section adds no stray space above Projects. */}
       <SidebarMenuSub
-        ref={attachListAutoAnimate}
+        ref={attachSidebarListAnimation}
         className="mx-1 mt-1 mb-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0 empty:mt-0"
       >
         {visibleEntries.map((entry) => (
@@ -1494,7 +1483,6 @@ interface SidebarProjectThreadListProps {
   confirmingArchiveThreadKey: string | null;
   setConfirmingArchiveThreadKey: React.Dispatch<React.SetStateAction<string | null>>;
   confirmArchiveButtonRefs: React.RefObject<Map<string, HTMLButtonElement>>;
-  attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   handleThreadClick: (
     event: React.MouseEvent,
     threadRef: ScopedThreadRef,
@@ -1548,7 +1536,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     confirmingArchiveThreadKey,
     setConfirmingArchiveThreadKey,
     confirmArchiveButtonRefs,
-    attachThreadListAutoAnimateRef,
     handleThreadClick,
     navigateToThread,
     handleMultiSelectContextMenu,
@@ -1600,7 +1587,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 
   return (
     <SidebarMenuSub
-      ref={attachThreadListAutoAnimateRef}
+      ref={attachSidebarListAnimation}
       className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0"
     >
       {shouldShowThreadPanel && showEmptyThreadState ? (
@@ -1655,7 +1642,6 @@ interface SidebarProjectItemProps {
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   duplicateThread: ReturnType<typeof useThreadActions>["duplicateThread"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
-  attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
   dragInProgressRef: React.RefObject<boolean>;
@@ -1685,7 +1671,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     deleteThread,
     duplicateThread,
     threadJumpLabelByKey,
-    attachThreadListAutoAnimateRef,
     expandThreadListForProject,
     collapseThreadListForProject,
     dragInProgressRef,
@@ -3237,7 +3222,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         confirmingArchiveThreadKey={confirmingArchiveThreadKey}
         setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
         confirmArchiveButtonRefs={confirmArchiveButtonRefs}
-        attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
         handleThreadClick={handleThreadClick}
         navigateToThread={navigateToThread}
         handleMultiSelectContextMenu={handleMultiSelectContextMenu}
@@ -3946,13 +3930,11 @@ interface SidebarProjectsContentProps {
   newThreadShortcutLabel: string | null;
   commandPaletteShortcutLabel: string | null;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
-  attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
   dragInProgressRef: React.RefObject<boolean>;
   suppressProjectClickAfterDragRef: React.RefObject<boolean>;
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
-  attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
   showSidebarSearch: boolean;
   showSidebarAttribution: boolean;
@@ -4027,13 +4009,11 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     newThreadShortcutLabel,
     commandPaletteShortcutLabel,
     threadJumpLabelByKey,
-    attachThreadListAutoAnimateRef,
     expandThreadListForProject,
     collapseThreadListForProject,
     dragInProgressRef,
     suppressProjectClickAfterDragRef,
     suppressProjectClickForContextMenuRef,
-    attachProjectListAutoAnimateRef,
     projectsLength,
     showSidebarSearch,
     showSidebarAttribution,
@@ -4085,7 +4065,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     deleteThread,
     duplicateThread,
     threadJumpLabelByKey,
-    attachThreadListAutoAnimateRef,
     expandThreadListForProject,
     collapseThreadListForProject,
     dragInProgressRef,
@@ -4275,7 +4254,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 </SidebarMenu>
               </DndContext>
             ) : (
-              <SidebarMenu ref={attachProjectListAutoAnimateRef}>
+              <SidebarMenu ref={attachSidebarListAnimation}>
                 {sortedProjects.map((project) => (
                   <SidebarProjectListRow
                     key={project.projectKey}
@@ -4691,24 +4670,6 @@ export default function Sidebar() {
 
   const handleProjectDragCancel = useCallback((_event: DragCancelEvent) => {
     dragInProgressRef.current = false;
-  }, []);
-
-  const animatedProjectListsRef = useRef(new WeakSet<HTMLElement>());
-  const attachProjectListAutoAnimateRef = useCallback((node: HTMLElement | null) => {
-    if (!node || animatedProjectListsRef.current.has(node)) {
-      return;
-    }
-    autoAnimate(node, SIDEBAR_LIST_ANIMATION_OPTIONS);
-    animatedProjectListsRef.current.add(node);
-  }, []);
-
-  const animatedThreadListsRef = useRef(new WeakSet<HTMLElement>());
-  const attachThreadListAutoAnimateRef = useCallback((node: HTMLElement | null) => {
-    if (!node || animatedThreadListsRef.current.has(node)) {
-      return;
-    }
-    autoAnimate(node, SIDEBAR_LIST_ANIMATION_OPTIONS);
-    animatedThreadListsRef.current.add(node);
   }, []);
 
   const visibleThreads = useMemo(
@@ -5363,13 +5324,11 @@ export default function Sidebar() {
               newThreadShortcutLabel={newThreadShortcutLabel}
               commandPaletteShortcutLabel={commandPaletteShortcutLabel}
               threadJumpLabelByKey={visibleThreadJumpLabelByKey}
-              attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
               expandThreadListForProject={expandThreadListForProject}
               collapseThreadListForProject={collapseThreadListForProject}
               dragInProgressRef={dragInProgressRef}
               suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
               suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
-              attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
               projectsLength={projects.length}
               showSidebarSearch={showSidebarSearch}
               showSidebarAttribution={showSidebarAttribution}

@@ -87,6 +87,30 @@ it("keeps Windows native paths separate from their Markdown URI identifiers", ()
   ]);
 });
 
+it("unwraps local empty-authority file:/// URIs while rejecting remote hosts, queries, and fragments", () => {
+  expect(
+    markdownImageSources(
+      [
+        "![Summary](file:///home/salt/repo/my%20chart.png)",
+        "![Duplicate](/home/salt/repo/my%20chart.png)",
+        "![Windows](file:///C:/workspace/my%20chart.png)",
+        "![Remote](file://server/share/chart.png)",
+        "![Query](file:///home/salt/repo/chart.png?raw=1)",
+        "![Hash](file:///home/salt/repo/chart.png#top)",
+      ].join("\n"),
+    ),
+  ).toEqual([
+    {
+      source: "/home/salt/repo/my%20chart.png",
+      path: "/home/salt/repo/my chart.png",
+    },
+    {
+      source: "C:/workspace/my%20chart.png",
+      path: "C:/workspace/my chart.png",
+    },
+  ]);
+});
+
 it("rejects outside roots, sibling prefixes, directories, executable content and oversized images", async () => {
   const { root, directory } = await fixture();
   const outside = join(directory, "outside.png");

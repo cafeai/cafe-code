@@ -53,7 +53,6 @@ import {
   persistComposerFile,
   type ComposerFileAttachment,
 } from "./attachments/composerFiles";
-const isRuntimeMode = Schema.is(RuntimeMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 // Compile once: persistence normalization and frequent composer edits reuse
 // this admission instead of recompiling the same bounded schema per value.
@@ -144,8 +143,6 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   // an entry already encodes "no selection for this instance".
   modelSelectionByProvider: Schema.optionalKey(Schema.Record(ProviderInstanceId, ModelSelection)),
   activeProvider: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
-  runtimeMode: Schema.optionalKey(RuntimeMode),
-  interactionMode: Schema.optionalKey(ProviderInteractionMode),
   subagentLimits: Schema.optionalKey(SubagentLimits),
   codexContextWindowOverride: Schema.optionalKey(Schema.NullOr(CodexContextWindowOverride)),
 });
@@ -274,8 +271,6 @@ export interface ComposerThreadDraftState {
   modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
   /** Routing key of the last picked instance (see `modelSelectionByProvider`). */
   activeProvider: ProviderInstanceId | null;
-  runtimeMode: RuntimeMode | null;
-  interactionMode: ProviderInteractionMode | null;
   /** Whole-object desired policy, including an explicit empty reset. Never sticky. */
   subagentLimits?: SubagentLimits;
   /** Chat-local intent; null is a reset, undefined is absent/overlay disposal. Never sticky. */
@@ -404,7 +399,6 @@ interface ComposerDraftStoreState {
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
       runtimeMode?: RuntimeMode;
-      interactionMode?: ProviderInteractionMode;
     },
   ) => void;
   /** Creates or updates the draft session tracked for a concrete project ref. */
@@ -418,7 +412,6 @@ interface ComposerDraftStoreState {
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
       runtimeMode?: RuntimeMode;
-      interactionMode?: ProviderInteractionMode;
     },
   ) => void;
   /** Updates mutable draft-session metadata without touching composer content. */
@@ -431,7 +424,6 @@ interface ComposerDraftStoreState {
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
       runtimeMode?: RuntimeMode;
-      interactionMode?: ProviderInteractionMode;
     },
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
@@ -501,14 +493,6 @@ interface ComposerDraftStoreState {
       persistSticky?: boolean;
     },
   ) => void;
-  setRuntimeMode: (
-    threadRef: ComposerThreadTarget,
-    runtimeMode: RuntimeMode | null | undefined,
-  ) => void;
-  setInteractionMode: (
-    threadRef: ComposerThreadTarget,
-    interactionMode: ProviderInteractionMode | null | undefined,
-  ) => void;
   setSubagentLimits: (threadRef: ComposerThreadTarget, limits: SubagentLimits | undefined) => void;
   setCodexContextWindowOverride: (
     threadRef: ComposerThreadTarget,
@@ -531,8 +515,6 @@ interface ComposerDraftStoreState {
       images: ComposerImageAttachment[];
       files: ComposerFileAttachment[];
       modelSelection: ModelSelection;
-      runtimeMode: RuntimeMode;
-      interactionMode: ProviderInteractionMode;
       axiomWebEnabled?: boolean;
       axiomMcpRevision?: number;
       axiomCommand?: AxiomCommand;
@@ -737,8 +719,6 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   persistedAttachments: EMPTY_PERSISTED_ATTACHMENTS,
   modelSelectionByProvider: EMPTY_MODEL_SELECTION_BY_PROVIDER,
   activeProvider: null,
-  runtimeMode: null,
-  interactionMode: null,
 });
 
 function createEmptyThreadDraft(): ComposerThreadDraftState {
@@ -750,8 +730,6 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     persistedAttachments: [],
     modelSelectionByProvider: {},
     activeProvider: null,
-    runtimeMode: null,
-    interactionMode: null,
   };
 }
 
@@ -769,8 +747,6 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.persistedAttachments.length === 0 &&
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
-    draft.runtimeMode === null &&
-    draft.interactionMode === null &&
     draft.subagentLimits === undefined &&
     draft.codexContextWindowOverride === undefined &&
     draft.axiomWebEnabled !== true &&
@@ -1316,7 +1292,6 @@ function createDraftThreadState(
     createdAt?: string;
     envMode?: DraftThreadEnvMode;
     runtimeMode?: RuntimeMode;
-    interactionMode?: ProviderInteractionMode;
   },
 ): DraftThreadState {
   const projectChanged =
@@ -1341,9 +1316,8 @@ function createDraftThreadState(
     projectId: projectRef.projectId,
     logicalProjectKey,
     createdAt: options?.createdAt ?? existingThread?.createdAt ?? new Date().toISOString(),
-    runtimeMode: options?.runtimeMode ?? existingThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
-    interactionMode:
-      options?.interactionMode ?? existingThread?.interactionMode ?? DEFAULT_INTERACTION_MODE,
+    runtimeMode: DEFAULT_RUNTIME_MODE,
+    interactionMode: DEFAULT_INTERACTION_MODE,
     branch: nextBranch,
     worktreePath: nextWorktreePath,
     envMode:
@@ -1524,16 +1498,8 @@ function normalizePersistedDraftThreads(
           typeof createdAt === "string" && createdAt.length > 0
             ? createdAt
             : new Date().toISOString(),
-        runtimeMode: isRuntimeMode(candidateDraftThread.runtimeMode)
-          ? candidateDraftThread.runtimeMode
-          : DEFAULT_RUNTIME_MODE,
-        interactionMode:
-          candidateDraftThread.interactionMode === "plan" ||
-          candidateDraftThread.interactionMode === "auto" ||
-          candidateDraftThread.interactionMode === "gemini-bypass" ||
-          candidateDraftThread.interactionMode === "default"
-            ? candidateDraftThread.interactionMode
-            : DEFAULT_INTERACTION_MODE,
+        runtimeMode: DEFAULT_RUNTIME_MODE,
+        interactionMode: DEFAULT_INTERACTION_MODE,
         branch: projectId !== null && typeof branch === "string" ? branch : null,
         worktreePath: projectId === null ? null : normalizedWorktreePath,
         envMode:
@@ -1653,16 +1619,6 @@ function normalizePersistedDraftsByThreadId(
           return file ? [persistComposerFile(file)] : [];
         })
       : [];
-    const runtimeMode = isRuntimeMode(draftCandidate.runtimeMode)
-      ? draftCandidate.runtimeMode
-      : null;
-    const interactionMode =
-      draftCandidate.interactionMode === "plan" ||
-      draftCandidate.interactionMode === "auto" ||
-      draftCandidate.interactionMode === "gemini-bypass" ||
-      draftCandidate.interactionMode === "default"
-        ? draftCandidate.interactionMode
-        : null;
     const subagentLimits = isSubagentLimits(draftCandidate.subagentLimits)
       ? draftCandidate.subagentLimits
       : undefined;
@@ -1727,8 +1683,6 @@ function normalizePersistedDraftsByThreadId(
       attachments.length === 0 &&
       files.length === 0 &&
       !hasModelData &&
-      !runtimeMode &&
-      !interactionMode &&
       subagentLimits === undefined &&
       codexContextWindowOverride === undefined &&
       draftCandidate.computerUseEnabled !== true
@@ -1782,8 +1736,6 @@ function normalizePersistedDraftsByThreadId(
             activeProvider,
           }
         : {}),
-      ...(runtimeMode ? { runtimeMode } : {}),
-      ...(interactionMode ? { interactionMode } : {}),
       ...(subagentLimits !== undefined ? { subagentLimits } : {}),
       ...(codexContextWindowOverride !== undefined ? { codexContextWindowOverride } : {}),
     };
@@ -1861,8 +1813,6 @@ function partializeComposerDraftStoreState(
       draft.persistedAttachments.length === 0 &&
       draft.files.length === 0 &&
       !hasModelData &&
-      draft.runtimeMode === null &&
-      draft.interactionMode === null &&
       draft.subagentLimits === undefined &&
       draft.codexContextWindowOverride === undefined &&
       draft.computerUseEnabled !== true
@@ -1897,8 +1847,6 @@ function partializeComposerDraftStoreState(
             activeProvider: draft.activeProvider,
           }
         : {}),
-      ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
-      ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
       ...(draft.subagentLimits !== undefined ? { subagentLimits: draft.subagentLimits } : {}),
       ...(draft.codexContextWindowOverride !== undefined
         ? { codexContextWindowOverride: draft.codexContextWindowOverride }
@@ -2147,8 +2095,6 @@ function toHydratedThreadDraft(
     persistedAttachments: [...persistedDraft.attachments],
     modelSelectionByProvider,
     activeProvider,
-    runtimeMode: persistedDraft.runtimeMode ?? null,
-    interactionMode: persistedDraft.interactionMode ?? null,
     ...(persistedDraft.subagentLimits !== undefined
       ? { subagentLimits: persistedDraft.subagentLimits }
       : {}),
@@ -2176,8 +2122,8 @@ function toHydratedDraftThreadState(
             ),
           )),
     createdAt: persistedDraftThread.createdAt,
-    runtimeMode: persistedDraftThread.runtimeMode,
-    interactionMode: persistedDraftThread.interactionMode,
+    runtimeMode: DEFAULT_RUNTIME_MODE,
+    interactionMode: DEFAULT_INTERACTION_MODE,
     branch: persistedDraftThread.branch,
     worktreePath: persistedDraftThread.worktreePath,
     envMode: persistedDraftThread.envMode,
@@ -2410,8 +2356,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 options.createdAt === undefined
                   ? existing.createdAt
                   : options.createdAt || existing.createdAt,
-              runtimeMode: options.runtimeMode ?? existing.runtimeMode,
-              interactionMode: options.interactionMode ?? existing.interactionMode,
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              interactionMode: DEFAULT_INTERACTION_MODE,
               branch: nextBranch,
               worktreePath: nextWorktreePath,
               envMode:
@@ -2947,34 +2893,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
-        setRuntimeMode: (threadRef, runtimeMode) => {
-          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
-          if (threadKey.length === 0) {
-            return;
-          }
-          const nextRuntimeMode = isRuntimeMode(runtimeMode) ? runtimeMode : null;
-          set((state) => {
-            const existing = state.draftsByThreadKey[threadKey];
-            if (!existing && nextRuntimeMode === null) {
-              return state;
-            }
-            const base = existing ?? createEmptyThreadDraft();
-            if (base.runtimeMode === nextRuntimeMode) {
-              return state;
-            }
-            const nextDraft: ComposerThreadDraftState = {
-              ...base,
-              runtimeMode: nextRuntimeMode,
-            };
-            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
-            if (shouldRemoveDraft(nextDraft)) {
-              delete nextDraftsByThreadKey[threadKey];
-            } else {
-              nextDraftsByThreadKey[threadKey] = nextDraft;
-            }
-            return { draftsByThreadKey: nextDraftsByThreadKey };
-          });
-        },
         setSubagentLimits: (threadRef, limits) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef);
           if (!threadKey || (limits !== undefined && !isSubagentLimits(limits))) return;
@@ -3011,40 +2929,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (shouldRemoveDraft(next)) delete draftsByThreadKey[threadKey];
             else draftsByThreadKey[threadKey] = next;
             return { draftsByThreadKey };
-          });
-        },
-        setInteractionMode: (threadRef, interactionMode) => {
-          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
-          if (threadKey.length === 0) {
-            return;
-          }
-          const nextInteractionMode =
-            interactionMode === "plan" ||
-            interactionMode === "auto" ||
-            interactionMode === "gemini-bypass" ||
-            interactionMode === "default"
-              ? interactionMode
-              : null;
-          set((state) => {
-            const existing = state.draftsByThreadKey[threadKey];
-            if (!existing && nextInteractionMode === null) {
-              return state;
-            }
-            const base = existing ?? createEmptyThreadDraft();
-            if (base.interactionMode === nextInteractionMode) {
-              return state;
-            }
-            const nextDraft: ComposerThreadDraftState = {
-              ...base,
-              interactionMode: nextInteractionMode,
-            };
-            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
-            if (shouldRemoveDraft(nextDraft)) {
-              delete nextDraftsByThreadKey[threadKey];
-            } else {
-              nextDraftsByThreadKey[threadKey] = nextDraft;
-            }
-            return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
         addImage: (threadRef, image) => {
@@ -3133,8 +3017,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                     [content.modelSelection.instanceId]: content.modelSelection,
                   },
                   activeProvider: content.modelSelection.instanceId,
-                  runtimeMode: content.runtimeMode,
-                  interactionMode: content.interactionMode,
                 },
               },
             };

@@ -167,6 +167,8 @@ export const ModelSelection = ModelSelectionSource.pipe(
 );
 export type ModelSelection = typeof ModelSelection.Type;
 
+// Historical turns and native owners can still report earlier access policies.
+// Current Cafe chat intent always uses DEFAULT_RUNTIME_MODE.
 export const RuntimeMode = Schema.Literals([
   "approval-required",
   "auto-accept-edits",
@@ -174,8 +176,8 @@ export const RuntimeMode = Schema.Literals([
 ]);
 export type RuntimeMode = typeof RuntimeMode.Type;
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
-// Gemini's unrestricted ACP launch needs an explicit, provider-specific
-// value. Existing full-access/default chats use the native Default policy.
+// The provider boundary still uses an explicit Gemini bypass mode. Older
+// turn records and live native owners can report Plan and Auto.
 export const ProviderInteractionMode = Schema.Literals([
   "default",
   "plan",

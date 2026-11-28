@@ -336,4 +336,81 @@ describe("makeGeminiLogin", () => {
       yield* Fiber.interrupt(fiber);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.live(
+    "shortcuts directly to a fresh verification link without OAuth when verification is pending, unless forceLogin is set",
+    () =>
+      Effect.gen(function* () {
+        const native = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fs = yield* FileSystem.FileSystem;
+        let spawnedLogin = 0;
+        const script = `
+          const { createInterface } = require("node:readline");
+          process.stdout.write("Open:\\n  " + process.env.CAFE_TEST_OAUTH_URL + "\\n");
+          createInterface({ input: process.stdin }).once("line", () => process.exit(0));
+        `;
+        const spawner = ChildProcessSpawner.make((command) => {
+          if (command._tag === "StandardCommand" && command.command === process.execPath) {
+            spawnedLogin++;
+          }
+          return makeFixtureSpawner(native, script).spawn(command);
+        });
+        let verificationPending = true;
+        const login = yield* makeGeminiLogin({
+          qualifyCli: () => Effect.succeed({ binaryPath: process.execPath }),
+          environment: {},
+          spawner,
+          fs,
+          hasSessions: Effect.succeed(true),
+          hasVerificationRequired: () => verificationPending,
+          refresh: Effect.sync(() => ({
+            authenticated: !verificationPending,
+            verificationUrl: verificationPending ? VALID_VERIFICATION_URL : null,
+          })),
+        });
+
+        // Even with active sessions, direct verification refresh does not spawn --login.
+        const directEvents: ServerProviderDeviceLoginEvent[] = [];
+        yield* login.loginDeviceCode(Effect.succeed(true)).pipe(
+          Stream.runForEach((event) =>
+            Effect.sync(() => {
+              directEvents.push(event);
+            }),
+          ),
+        );
+        expect(spawnedLogin).toBe(0);
+        expect(directEvents).toEqual([
+          { type: "verification-required", verificationUrl: VALID_VERIFICATION_URL },
+        ]);
+
+        // forceLogin enforces idle sessions before starting OAuth account switch.
+        const busyError = yield* login
+          .loginDeviceCode(Effect.succeed(true), { forceLogin: true })
+          .pipe(Stream.runCollect, Effect.flip);
+        expect(geminiLoginFailureMessage(busyError)).toBe(GEMINI_LOGIN_ERRORS.busy);
+        expect(spawnedLogin).toBe(0);
+
+        // Once verified, direct check emits authenticated without spawning --login.
+        verificationPending = false;
+        const authedLogin = yield* makeGeminiLogin({
+          qualifyCli: () => Effect.succeed({ binaryPath: process.execPath }),
+          environment: {},
+          spawner,
+          fs,
+          hasSessions: Effect.succeed(false),
+          hasVerificationRequired: () => true,
+          refresh: Effect.succeed({ authenticated: true, verificationUrl: null }),
+        });
+        const authedEvents: ServerProviderDeviceLoginEvent[] = [];
+        yield* authedLogin.loginDeviceCode(Effect.succeed(false)).pipe(
+          Stream.runForEach((event) =>
+            Effect.sync(() => {
+              authedEvents.push(event);
+            }),
+          ),
+        );
+        expect(spawnedLogin).toBe(0);
+        expect(authedEvents).toEqual([{ type: "authenticated" }]);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });

@@ -967,8 +967,8 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-clear-pending-t
           {
             instanceId: "claudeAgent",
             model: "claude-opus-4-6",
-            runtimeMode: "approval-required",
-            interactionMode: "plan",
+            runtimeMode: "full-access",
+            interactionMode: "default",
           },
         ]);
         assert.deepEqual(pendingRows, [{ count: 0 }]);

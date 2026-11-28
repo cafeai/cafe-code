@@ -12,7 +12,9 @@ import {
   getPrimaryEnvironmentConnection,
   readEnvironmentConnection,
   resetEnvironmentServiceForTests,
+  resetSavedEnvironmentRegistryStoreForTests,
   resetSavedEnvironmentRuntimeStoreForTests,
+  useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../../environments/runtime";
 import {
@@ -22,7 +24,7 @@ import {
   wsConnectionStatusAtom,
 } from "../../rpc/wsConnectionState";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
-import { observeVisualizationOwner } from "./visualizationOwner";
+import { canReadVisualizationHistory, observeVisualizationOwner } from "./visualizationOwner";
 const registeredFixture = vi.hoisted(() => ({
   client: null as WsRpcClient | null,
   known: null as KnownEnvironment | null,
@@ -61,6 +63,7 @@ afterEach(async () => {
   await resetEnvironmentServiceForTests();
   resetWsConnectionStateForTests();
   resetSavedEnvironmentRuntimeStoreForTests();
+  resetSavedEnvironmentRegistryStoreForTests();
   registeredFixture.client = null;
   registeredFixture.known = null;
   registeredFixture.kind = "primary";
@@ -205,5 +208,48 @@ describe("registered visualization connection ownership", () => {
     } finally {
       owner.dispose();
     }
+  });
+
+  it("disables visualization history on cleartext non-loopback HTTP saved servers and allows HTTPS, loopback, and relay", () => {
+    const api = installApi(undefined, false);
+    installRegisteredConnection(api, "saved");
+    const setRecord = (record: { httpBaseUrl: string; wsBaseUrl: string; transport?: "relay" }) => {
+      useSavedEnvironmentRegistryStore.setState({
+        byId: {
+          [environmentId]: {
+            environmentId,
+            label: "Remote",
+            createdAt: "2026-10-13T01:02:03.000Z",
+            lastConnectedAt: "2026-10-13T01:02:03.000Z",
+            ...record,
+          },
+        },
+      });
+    };
+
+    setRecord({
+      httpBaseUrl: "http://100.114.218.16:3773",
+      wsBaseUrl: "ws://100.114.218.16:3773/ws",
+    });
+    expect(canReadVisualizationHistory(environmentId)).toBe(false);
+
+    setRecord({
+      httpBaseUrl: "https://100.114.218.16:3774",
+      wsBaseUrl: "wss://100.114.218.16:3774/ws",
+    });
+    expect(canReadVisualizationHistory(environmentId)).toBe(true);
+
+    setRecord({
+      httpBaseUrl: "http://127.0.0.1:3773",
+      wsBaseUrl: "ws://127.0.0.1:3773/ws",
+    });
+    expect(canReadVisualizationHistory(environmentId)).toBe(true);
+
+    setRecord({
+      transport: "relay",
+      httpBaseUrl: "http://relay-placeholder.invalid",
+      wsBaseUrl: "ws://relay-placeholder.invalid/ws",
+    });
+    expect(canReadVisualizationHistory(environmentId)).toBe(true);
   });
 });

@@ -104,7 +104,6 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
         models: [],
         slashCommands: [],
         skills: [],
-        showInteractionModeToggle: true,
         runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
         message: "Checking the configured native AxiomCLI.",
       });

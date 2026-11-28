@@ -60,6 +60,7 @@ export const loginBoundProviderAccount = Effect.fn("loginBoundProviderAccount")(
 /** A one-shot subscriber owns the temporary login, never the daemon ledger. */
 export const loginBoundProviderDeviceAccount = <SessionError>(input: {
   readonly instanceId: ProviderInstanceId;
+  readonly forceLogin?: boolean;
   readonly getInstance: () => Effect.Effect<ProviderInstance | undefined>;
   readonly listSessions: Effect.Effect<ReadonlyArray<ProviderSession>, SessionError>;
 }) =>
@@ -89,7 +90,7 @@ export const loginBoundProviderDeviceAccount = <SessionError>(input: {
         );
       });
       return instance.adapter
-        .loginDeviceCode(hasOwnedSessions)
+        .loginDeviceCode(hasOwnedSessions, input.forceLogin ? { forceLogin: true } : undefined)
         .pipe(
           Stream.mapEffect((event: ServerProviderDeviceLoginEvent) =>
             current.pipe(Effect.as(event)),

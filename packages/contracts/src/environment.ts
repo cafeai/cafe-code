@@ -25,6 +25,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   // Older backends require a project for every conversation. Absence is not
   // support: clients must require an explicit true before submitting null.
   standaloneChats: Schema.optionalKey(Schema.Boolean),
+  // Older backends expect the Gemini bypass choice on the command wire.
+  fullAccessChats: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

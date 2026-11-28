@@ -54,7 +54,6 @@ export interface ProviderProbeResult {
 export interface ServerProviderPresentation {
   readonly displayName: string;
   readonly badgeLabel?: string;
-  readonly showInteractionModeToggle?: boolean;
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
@@ -293,9 +292,8 @@ export function buildServerProvider(input: {
   return {
     displayName: input.presentation.displayName,
     ...(input.presentation.badgeLabel ? { badgeLabel: input.presentation.badgeLabel } : {}),
-    ...(typeof input.presentation.showInteractionModeToggle === "boolean"
-      ? { showInteractionModeToggle: input.presentation.showInteractionModeToggle }
-      : {}),
+    // Advise older renderers that these controls have been retired.
+    showInteractionModeToggle: false,
     enabled: input.enabled,
     installed: input.probe.installed,
     version: input.probe.version,

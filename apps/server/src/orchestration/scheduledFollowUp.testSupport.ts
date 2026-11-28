@@ -28,7 +28,7 @@ export const seedScheduledFollowUp = (
     const scheduleId = crypto.randomUUID();
     const runId = crypto.randomUUID();
     const modelSelection = input.overrideModelSelection ?? input.modelSelection;
-    const runtimeMode = input.runtimeMode ?? "approval-required";
+    const runtimeMode = input.runtimeMode ?? "full-access";
     const command: typeof ThreadTurnStartCommand.Type = {
       type: "thread.turn.start",
       commandId: CommandId.make(`server:scheduled:${runId}`),

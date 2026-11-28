@@ -1543,7 +1543,9 @@ export function ProviderInstanceCard({
                 ) : (
                   <LogInIcon className="size-3.5" />
                 )}
-                {uiText("Log in", undefined, undefined, uiLocale)}
+                {liveProvider?.authActions?.verificationRequired
+                  ? uiText("Verify account", undefined, undefined, uiLocale)
+                  : uiText("Log in", undefined, undefined, uiLocale)}
               </Button>
             ) : null}
             {onLogIn && loginDisabledReason ? (

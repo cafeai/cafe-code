@@ -193,7 +193,7 @@ describe("decider project scripts", () => {
         { id: "reasoningEffort", value: "high" },
         { id: "fastMode", value: true },
       ]),
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
   });
 
@@ -259,7 +259,7 @@ describe("decider project scripts", () => {
           type: "thread.runtime-mode.set",
           commandId: CommandId.make("cmd-runtime-mode-set"),
           threadId: ThreadId.make("thread-1"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: now,
         },
         readModel,
@@ -274,7 +274,7 @@ describe("decider project scripts", () => {
       type: "thread.runtime-mode-set",
       payload: {
         threadId: ThreadId.make("thread-1"),
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
       },
     });
 
@@ -284,7 +284,7 @@ describe("decider project scripts", () => {
           type: "thread.interaction-mode.set",
           commandId: CommandId.make("cmd-interaction-mode-set"),
           threadId: ThreadId.make("thread-1"),
-          interactionMode: "plan",
+          interactionMode: "default",
           createdAt: now,
         },
         readModel,
@@ -301,7 +301,7 @@ describe("decider project scripts", () => {
       type: "thread.interaction-mode-set",
       payload: {
         threadId: ThreadId.make("thread-1"),
-        interactionMode: "plan",
+        interactionMode: "default",
       },
     });
   });

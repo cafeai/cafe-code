@@ -3452,6 +3452,38 @@ const make = Effect.gen(function* () {
           } else {
             appliedSessionLifecycle =
               (yield* dispatchObservedSession(sessionCommand, thread.session)) !== undefined;
+            // A concurrent `sendTurn` ACK or `turn.started` for the exact same
+            // turn can advance the session tuple from `starting` (or update
+            // `subagentRuntimeId`) right before `turn.completed` commits. Retry
+            // once only if the fresh projection still owns this exact active
+            // turn under the same provider/account/generation; never override a
+            // newer turn or Stop.
+            if (
+              !appliedSessionLifecycle &&
+              event.type === "turn.completed" &&
+              eventTurnId !== undefined &&
+              incomingRuntimeId !== undefined
+            ) {
+              const refreshedSession = (yield* resolveThreadShell(thread.id))?.session ?? null;
+              if (
+                refreshedSession !== null &&
+                refreshedSession.status === "running" &&
+                refreshedSession.activeTurnId !== null &&
+                sameId(refreshedSession.activeTurnId, eventTurnId) &&
+                refreshedSession.providerName === event.provider &&
+                refreshedSession.providerInstanceId === event.providerInstanceId &&
+                refreshedSession.subagentRuntimeId === incomingRuntimeId
+              ) {
+                appliedSessionLifecycle =
+                  (yield* dispatchObservedSession(
+                    {
+                      ...sessionCommand,
+                      expectedSubagentRuntimeId: incomingRuntimeId,
+                    },
+                    refreshedSession,
+                  )) !== undefined;
+              }
+            }
           }
           if (appliedSessionLifecycle) {
             // Goal barriers and recovery markers belong to the same accepted

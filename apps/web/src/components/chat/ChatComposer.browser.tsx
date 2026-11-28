@@ -372,15 +372,11 @@ async function mountComposer(
     activePendingDraftAnswers: {},
     activePendingQuestionIndex: 0,
     respondingRequestIds: [],
-    showPlanFollowUpPrompt: false,
-    activeProposedPlan: null,
     activePlan: null,
     sidebarProposedPlan: null,
-    planSidebarLabel: "Plan",
     planSidebarOpen: false,
     goalControlsSupported: false,
     runtimeMode: "approval-required",
-    interactionMode: "default",
     lockedProvider: null,
     providerStatuses: providers,
     activeProjectDefaultModelSelection: null,
@@ -406,7 +402,6 @@ async function mountComposer(
     onRemoveFollowUpQueueItem: vi.fn(),
     onClearFollowUpQueue: vi.fn(),
     onInterrupt: vi.fn(),
-    onImplementPlanInNewThread: vi.fn(),
     onRespondToApproval: vi.fn().mockResolvedValue(undefined),
     onSelectActivePendingUserInputOption: vi.fn(),
     onAdvanceActivePendingUserInput: vi.fn(),
@@ -423,9 +418,6 @@ async function mountComposer(
           createModelSelection(instanceId, model, options),
         );
     },
-    toggleInteractionMode: vi.fn(),
-    handleRuntimeModeChange: vi.fn(),
-    handleInteractionModeChange: vi.fn(),
     togglePlanSidebar: vi.fn(),
     onOpenGoalDialog: vi.fn(),
     focusComposer: vi.fn(),
@@ -680,12 +672,7 @@ describe("provider-specific composer menu actions", () => {
     await expect
       .element(page.getByRole("menuitem", { name: "Codex review", exact: true }))
       .not.toBeInTheDocument();
-    const access = page.getByRole("menuitemradio", { name: "Full access", exact: true });
     const goal = page.getByRole("menuitem", { name: "Goal", exact: true });
-    expect(
-      access.element().compareDocumentPosition(heading.element()) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
     expect(
       heading.element().compareDocumentPosition(goal.element()) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
@@ -1799,11 +1786,16 @@ describe("provider-specific composer menu actions", () => {
         (review.element() as HTMLButtonElement).click();
         await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
       }
-      await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-      await expect
-        .element(page.getByRole("menuitem", { name: "Codex review", exact: true }))
-        .not.toBeInTheDocument();
-      await closeComposerControlsWithKeyboard();
+      const controls = document.querySelector('button[aria-label="More composer controls"]');
+      if (controls !== null) {
+        await page.elementLocator(controls).click();
+        const menu = page.getByRole("menu");
+        await expect.element(menu).toBeVisible();
+        await expect
+          .element(menu.getByRole("menuitem", { name: "Codex review", exact: true }))
+          .not.toBeInTheDocument();
+        await closeComposerControlsWithKeyboard();
+      }
     }
     await fixture.select("codex");
     const review = page.getByRole("button", { name: "Code review", exact: true });
@@ -1854,6 +1846,19 @@ describe("provider-specific composer menu actions", () => {
     const owner = createComposerOwner(context, "composer-delivery");
     await owner.run(async () => {
       await using fixture = await owner.observe("mount", () => mountComposer(1100, {}, owner));
+      const expectNoDeliveryControls = async () => {
+        const controls = document.querySelector('button[aria-label="More composer controls"]');
+        if (controls === null) return;
+        await owner.observe("controls", () => page.elementLocator(controls).click());
+        const menu = page.getByRole("menu");
+        await owner.observe("assertion", () => expect.element(menu).toBeVisible());
+        await owner.observe("assertion", () =>
+          expect
+            .element(menu.getByText("Message delivery", { exact: true }))
+            .not.toBeInTheDocument(),
+        );
+        await closeComposerControlsWithKeyboard(owner);
+      };
       try {
         await owner.observe("selection", () => fixture.select("claudeAgent"));
         await owner.observe("controls", () =>
@@ -1872,17 +1877,7 @@ describe("provider-specific composer menu actions", () => {
           expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty(
             "deliveryPriority",
           );
-          if (id !== "claude-work") {
-            await owner.observe("controls", () =>
-              page.getByRole("button", { name: "More composer controls", exact: true }).click(),
-            );
-            await owner.observe("assertion", () =>
-              expect
-                .element(page.getByText("Message delivery", { exact: true }))
-                .not.toBeInTheDocument(),
-            );
-            await closeComposerControlsWithKeyboard(owner);
-          }
+          if (id !== "claude-work") await expectNoDeliveryControls();
         }
         await owner.observe("selection", () => fixture.select("claudeAgent"));
         await owner.observe("render", () =>
@@ -1904,15 +1899,7 @@ describe("provider-specific composer menu actions", () => {
         expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty(
           "deliveryPriority",
         );
-        await owner.observe("controls", () =>
-          page.getByRole("button", { name: "More composer controls", exact: true }).click(),
-        );
-        await owner.observe("assertion", () =>
-          expect
-            .element(page.getByText("Message delivery", { exact: true }))
-            .not.toBeInTheDocument(),
-        );
-        await closeComposerControlsWithKeyboard(owner);
+        await expectNoDeliveryControls();
         expect(document.querySelector('[data-chat-composer-tab="true"]')).toBeNull();
         await owner.observe("render", () => fixture.update({ providerStatuses: providers }));
         await owner.observe("controls", () =>

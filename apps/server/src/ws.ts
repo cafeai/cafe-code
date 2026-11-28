@@ -910,9 +910,7 @@ const makeWsRpcLayer = (
         const retiresGlide =
           normalizedCommand.type === "thread.delete" ||
           normalizedCommand.type === "thread.archive" ||
-          normalizedCommand.type === "thread.session.stop" ||
-          (normalizedCommand.type === "thread.runtime-mode.set" &&
-            normalizedCommand.runtimeMode !== "full-access");
+          normalizedCommand.type === "thread.session.stop";
         const guardedDispatch = retiresGlide
           ? Effect.tryPromise({
               try: () =>
@@ -921,10 +919,7 @@ const makeWsRpcLayer = (
                   threadId: "threadId" in normalizedCommand ? normalizedCommand.threadId : "",
                 }),
               catch: () =>
-                toDispatchCommandError(
-                  undefined,
-                  "Could not retire Glide before changing this chat's access.",
-                ),
+                toDispatchCommandError(undefined, "Could not stop computer use for this chat."),
             }).pipe(Effect.andThen(dispatchEffect))
           : dispatchEffect;
         return startup

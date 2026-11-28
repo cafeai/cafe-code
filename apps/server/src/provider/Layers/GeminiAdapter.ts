@@ -49,6 +49,7 @@ import {
 import { APPLICATION_VERSION } from "../../applicationVersion.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeManagementMcpSession } from "../../mcp/sessionConnection.ts";
+import { buildCafeInstructions } from "../CafeInstructions.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -180,7 +181,7 @@ interface GeminiPromptGroup {
   pending: number;
   submitted: number;
   rootQueued: boolean;
-  followUpPending: boolean;
+  latestQueued: boolean;
   latest: { readonly index: number; readonly response: AcpSchema.PromptResponse } | undefined;
 }
 
@@ -1135,6 +1136,26 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             clientInfo: { name: "cafe-code", version: APPLICATION_VERSION },
             observeSessionConfigUpdates: true,
             observeToolLifecycle: true,
+            sessionMeta: (initializeResult) => {
+              const antigravity = (
+                initializeResult.agentCapabilities?._meta as
+                  | {
+                      readonly antigravity?: {
+                        readonly systemPrompt?: { readonly append?: unknown };
+                      };
+                    }
+                  | null
+                  | undefined
+              )?.antigravity;
+              if (antigravity?.systemPrompt?.append !== true) return undefined;
+              return {
+                antigravity: {
+                  systemPrompt: {
+                    append: buildCafeInstructions({ cwd }),
+                  },
+                },
+              };
+            },
             ...(managementMcp ? { managementMcp } : {}),
             ...(resume
               ? { resumeSessionId: resume.sessionId, resumeSessionPolicy: "acknowledged" }
@@ -1483,7 +1504,9 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           configOptions,
           isCurrent: () => ownsPromptGroup(ctx, group) && !ctx.permissionModeRevoked,
           onQueued: () => {
-            if (index === 0 && ownsPromptGroup(ctx, group)) group.rootQueued = true;
+            if (!ownsPromptGroup(ctx, group)) return;
+            if (index === 0) group.rootQueued = true;
+            if (index === group.submitted) group.latestQueued = true;
           },
         },
       );
@@ -1492,7 +1515,6 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
         Effect.gen(function* () {
           if (!ownsPromptGroup(ctx, group)) return;
           group.pending -= 1;
-          if (index !== 0) group.followUpPending = false;
           if (!group.latest || group.latest.index < index)
             group.latest = { index, response: result };
           // Antigravity can answer the original RPC as soon as it receives a
@@ -1545,7 +1567,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
               threadId,
               Effect.gen(function* () {
                 if (!ownsPromptGroup(ctx, group)) return;
-                if (index !== 0 || group.followUpPending) {
+                if (index !== 0 || group.submitted > 0) {
                   yield* emit(
                     {
                       ...(yield* base(threadId)),
@@ -1640,15 +1662,22 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           group.turnId !== input.expectedTurnId ||
           !ownsPromptGroup(ctx, group) ||
           ctx.permissionModeRevoked ||
-          !group.rootQueued ||
-          group.followUpPending ||
+          !group.latestQueued ||
+          group.pending !== 1 ||
           group.submitted >= MAX_GEMINI_FOLLOW_UPS_PER_TURN
         )
           return yield* deferSteer();
         const prompt = yield* makePrompt(ctx, input, "steerTurn");
-        if (!ownsPromptGroup(ctx, group) || ctx.permissionModeRevoked) return yield* deferSteer();
+        if (
+          !ownsPromptGroup(ctx, group) ||
+          ctx.permissionModeRevoked ||
+          !group.latestQueued ||
+          group.pending !== 1 ||
+          group.submitted >= MAX_GEMINI_FOLLOW_UPS_PER_TURN
+        )
+          return yield* deferSteer();
         yield* Effect.gen(function* () {
-          group.followUpPending = true;
+          group.latestQueued = false;
           group.pending += 1;
           group.submitted += 1;
           yield* launchGroupedPrompt(ctx, group, prompt, group.submitted);
@@ -1728,7 +1757,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             pending: 1,
             submitted: 0,
             rootQueued: false,
-            followUpPending: false,
+            latestQueued: false,
             latest: undefined,
           };
           ctx.promptGroup = group;

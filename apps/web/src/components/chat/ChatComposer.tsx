@@ -24,7 +24,6 @@ import type {
   ProviderSkillsInput,
   ProviderCommandsInput,
   ProviderApprovalDecision,
-  ProviderInteractionMode,
   ProviderDeliveryPriority,
   ResolvedKeybindingsConfig,
   RuntimeMode,
@@ -112,7 +111,6 @@ import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import type { ComposerInteractionCallbacks } from "./ComposerInteractionCard";
-import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerTaskProgress } from "./ComposerTaskProgress";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
@@ -147,7 +145,6 @@ import { basenameOfPath } from "../../vscode-icons";
 import { cn, newCommandId, randomUUID } from "~/lib/utils";
 import { MenuItem } from "../ui/menu";
 import { resolveShortcutCommand } from "../../keybindings";
-import { Separator } from "../ui/separator";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
@@ -161,8 +158,6 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
-import { proposedPlanTitle } from "../../proposedPlan";
-import { getProviderInteractionModeToggle } from "../../providerModels";
 import {
   deriveProviderInstanceEntries,
   resolveProviderDriverKindForInstanceSelection,
@@ -198,13 +193,6 @@ import { useStore } from "../../store";
 import { ProviderUsageResetButton } from "../ProviderUsageResetButton";
 import { dictationStatusQueryOptions } from "../../lib/dictationReactQuery";
 import { domSnapshot, mobileDebugLog } from "../../lib/mobileDebugLog";
-import {
-  applyClaudePermissionMode,
-  type ClaudePermissionMode,
-  deriveClaudePermissionMode,
-  getNextClaudePermissionMode,
-} from "./claudePermissionMode";
-import { applyGeminiPermissionMode, deriveGeminiPermissionMode } from "./geminiPermissionMode";
 
 function getIMAGE_SIZE_LIMIT_LABEL() {
   return uiText("{value0}MB", {
@@ -299,8 +287,6 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   connectingStopAvailable?: boolean | undefined;
   backgroundStopAvailable?: boolean | undefined;
   stopInFlight?: boolean | undefined;
-  showPlanFollowUpPrompt: boolean;
-  promptHasText: boolean;
   isSendBusy: boolean;
   isConnecting: boolean;
   isEnvironmentUnavailable: boolean;
@@ -313,7 +299,6 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   onArmPostSubmitInterruptGuard: () => void;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
-  onImplementPlanInNewThread: () => void;
 }) {
   return (
     <>
@@ -345,8 +330,6 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         connectingStopAvailable={props.connectingStopAvailable}
         backgroundStopAvailable={props.backgroundStopAvailable}
         stopInFlight={props.stopInFlight}
-        showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
-        promptHasText={props.promptHasText}
         isSendBusy={props.isSendBusy}
         isQueueEditing={props.isQueueEditing ?? false}
         isConnecting={props.isConnecting}
@@ -358,7 +341,6 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         onArmPostSubmitInterruptGuard={props.onArmPostSubmitInterruptGuard}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
-        onImplementPlanInNewThread={props.onImplementPlanInNewThread}
       />
     </>
   );
@@ -922,12 +904,9 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   respondingRequestIds: ApprovalRequestId[];
 
   // Plan
-  showPlanFollowUpPrompt: boolean;
-  activeProposedPlan: Thread["proposedPlans"][number] | null;
   activePlan: ActivePlanState | null;
   activeSubagents?: ReadonlyArray<WorkLogEntry>;
   sidebarProposedPlan: LatestProposedPlanState | null;
-  planSidebarLabel: string;
   planSidebarOpen: boolean;
   sessionRailVisible?: boolean;
   onShowSessionRail?: () => void;
@@ -940,8 +919,6 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
 
   // Mode
   runtimeMode: RuntimeMode;
-  interactionMode: ProviderInteractionMode;
-  geminiBypassInstanceId?: ProviderInstanceId | null;
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
@@ -984,7 +961,6 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   onCancelQueueEdit?: () => void;
   onClearFollowUpQueue: () => void;
   onInterrupt: () => void;
-  onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -1008,9 +984,6 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
     model: string,
     options?: ModelSelection["options"],
   ) => void;
-  toggleInteractionMode: () => void;
-  handleRuntimeModeChange: (mode: RuntimeMode) => void;
-  handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
   togglePlanSidebar: () => void;
   onOpenGoalDialog: () => void;
   onOpenSubagentDetail?: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
@@ -1061,12 +1034,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activePendingDraftAnswers,
     activePendingQuestionIndex,
     respondingRequestIds,
-    showPlanFollowUpPrompt,
-    activeProposedPlan,
     activePlan,
     activeSubagents = [],
     sidebarProposedPlan,
-    planSidebarLabel,
     planSidebarOpen,
     sessionRailVisible = false,
     onShowSessionRail,
@@ -1077,8 +1047,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onFocusSessionRail,
     goalControlsSupported,
     runtimeMode,
-    interactionMode,
-    geminiBypassInstanceId,
     lockedProvider,
     providerStatuses,
     activeProjectDefaultModelSelection,
@@ -1105,7 +1073,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onRemoveFollowUpQueueItem,
     onClearFollowUpQueue,
     onInterrupt,
-    onImplementPlanInNewThread,
     onRespondToApproval,
     onRespondToInteraction,
     onResolveInteractionUrl,
@@ -1117,9 +1084,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onChangeActivePendingUserInputCustomAnswer,
     onSnoozeActivePendingUserInput,
     onProviderModelSelect,
-    toggleInteractionMode,
-    handleRuntimeModeChange,
-    handleInteractionModeChange,
     togglePlanSidebar,
     onOpenGoalDialog,
     onOpenSubagentDetail,
@@ -1340,7 +1304,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProvider,
     selectedInstanceId,
     runtimeMode,
-    interactionMode,
     activeThread?.runtimeMode,
     activeThread?.interactionMode,
     activeThread?.session?.createdAt,
@@ -1708,100 +1671,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const selectedPromptEffort = composerProviderState.promptEffort;
   const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
-  const selectedProviderUsesNativePermissionModes =
-    selectedProvider === "claudeAgent" ||
-    selectedProvider === "grok" ||
-    selectedProvider === "gemini";
-  const geminiPermissionModeBusy =
-    selectedProvider === "gemini" &&
-    (phase === "running" ||
-      isSendBusy ||
-      isConnecting ||
-      activeThread?.session?.status === "running");
   // Ambiance composer surface: tint the frame ring with the current weather
   // state color (via CSS variables owned by AmbianceLayer). Ultrathink's
   // rainbow frame intentionally wins when both want the frame.
   const ambianceComposerRing = useSettings(
     (appSettings) => appSettings.ambianceEnabled && appSettings.ambianceSurfaceComposer,
   );
-  const composerProviderControls = useMemo(
-    () => ({
-      showInteractionModeToggle:
-        selectedProvider !== "gemini" &&
-        getProviderInteractionModeToggle(providerStatuses, selectedProvider),
-    }),
-    [providerStatuses, selectedProvider],
-  );
-  const handleNativePermissionModeChange = useCallback(
-    (mode: ClaudePermissionMode) => {
-      if (geminiPermissionModeBusy) return;
-      if (selectedProvider === "gemini" && mode === "bypassPermissions") {
-        if (selectedProviderEntry?.driverKind !== "gemini" || !selectedModel) return;
-        // Keep explicit consent with the selected account even if that
-        // account was chosen through a default that later changes.
-        const drafts = useComposerDraftStore.getState();
-        drafts.setModelSelection(
-          composerDraftTarget,
-          createModelSelection(selectedInstanceId, selectedModel),
-        );
-        if (interactionMode === "gemini-bypass" && geminiBypassInstanceId !== selectedInstanceId) {
-          drafts.setInteractionMode(composerDraftTarget, "gemini-bypass");
-        }
-      }
-      const mapped =
-        selectedProvider === "gemini"
-          ? applyGeminiPermissionMode(mode)
-          : applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
-      const next =
-        selectedProvider === "grok" && mode === "auto"
-          ? { ...mapped, runtimeMode: "auto-accept-edits" as const }
-          : mapped;
-      // Both draft-store updates are synchronous. Calling only the fields that
-      // changed also avoids an unnecessary Claude session
-      // restart when switching between Plan/Auto and the underlying access
-      // policy can safely remain in place for a live SDK mode transition.
-      if (next.runtimeMode !== runtimeMode) {
-        handleRuntimeModeChange(next.runtimeMode);
-      }
-      if (next.interactionMode !== interactionMode) {
-        handleInteractionModeChange(next.interactionMode);
-      }
-    },
-    [
-      composerDraftTarget,
-      geminiBypassInstanceId,
-      geminiPermissionModeBusy,
-      handleInteractionModeChange,
-      handleRuntimeModeChange,
-      interactionMode,
-      runtimeMode,
-      selectedInstanceId,
-      selectedModel,
-      selectedProvider,
-      selectedProviderEntry?.driverKind,
-    ],
-  );
-  const cycleComposerInteractionMode = useCallback(() => {
-    if (
-      selectedProvider === "claudeAgent" ||
-      selectedProvider === "grok" ||
-      selectedProvider === "gemini"
-    ) {
-      const currentMode =
-        selectedProvider === "gemini"
-          ? (deriveGeminiPermissionMode({ interactionMode, runtimeMode }) ?? "default")
-          : deriveClaudePermissionMode({ interactionMode, runtimeMode });
-      handleNativePermissionModeChange(getNextClaudePermissionMode(currentMode));
-      return;
-    }
-    toggleInteractionMode();
-  }, [
-    handleNativePermissionModeChange,
-    interactionMode,
-    runtimeMode,
-    selectedProvider,
-    toggleInteractionMode,
-  ]);
   const selectedModelSelection = useMemo<ModelSelection>(
     () => createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
@@ -2175,24 +2050,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: uiText("/model", undefined, undefined, uiLocale),
           description: uiText("Switch the model for this chat", undefined, undefined, uiLocale),
         },
-        ...(selectedProvider === "gemini"
-          ? []
-          : [
-              {
-                id: "slash:plan",
-                type: "slash-command" as const,
-                command: "plan" as const,
-                label: uiText("/plan", undefined, undefined, uiLocale),
-                description: uiText("Switch to Plan", undefined, undefined, uiLocale),
-              },
-              {
-                id: "slash:default",
-                type: "slash-command" as const,
-                command: "default" as const,
-                label: uiText("/default", undefined, undefined, uiLocale),
-                description: uiText("Switch back to Build", undefined, undefined, uiLocale),
-              },
-            ]),
         ...(selectedProvider === "codex" ||
         selectedProvider === "opencode" ||
         selectedProvider === "axiom"
@@ -2321,18 +2178,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const isComposerDictationUnavailable =
     isSendBusy || isConnecting || environmentUnavailable !== null;
   const isComposerDictationEnabled = showComposerDictation && !isComposerDictationUnavailable;
-  const hasComposerHeader =
-    isComposerApprovalState ||
-    pendingUserInputs.length > 0 ||
-    (showPlanFollowUpPrompt && activeProposedPlan !== null);
+  const hasComposerHeader = isComposerApprovalState || pendingUserInputs.length > 0;
   const showCollapsedMobilePromptRow =
     isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
 
   const composerFooterHasWideActions =
-    showPlanFollowUpPrompt ||
-    activePendingProgress !== null ||
-    activePlan !== null ||
-    activeSubagents.length > 0;
+    activePendingProgress !== null || activePlan !== null || activeSubagents.length > 0;
   // Runtime checklists now live in the compact composer progress popover.
   // The retained side-panel control is intentionally limited to authored plan
   // documents so a task update can never reopen the old Tasks panel.
@@ -2353,9 +2204,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ) {
       return `running:${phase}:${recoveryStopAvailable}:${connectingStopAvailable}:${backgroundStopAvailable}:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
     }
-    if (showPlanFollowUpPrompt) {
-      return `${prompt.trim().length > 0 ? "plan:refine" : "plan:implement"}:dictation:${showComposerDictation}`;
-    }
     return `idle:${composerSendState.hasSendableContent}:${isSendBusy}:${isConnecting}:${isPreparingWorktree}:dictation:${showComposerDictation}`;
   }, [
     activePendingIsResponding,
@@ -2371,7 +2219,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     postSubmitInterruptGuardActive,
     prompt,
     showComposerDictation,
-    showPlanFollowUpPrompt,
   ]);
 
   const isComposerMenuLoading =
@@ -2961,14 +2808,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
-        if (selectedProvider === "gemini") return;
-        void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
-        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
-          expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
-        });
-        if (applied) {
-          setComposerHighlightedItemId(null);
-        }
         return;
       }
       if (item.type === "provider-slash-command") {
@@ -3019,7 +2858,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
     [
       applyPromptReplacement,
-      handleInteractionModeChange,
       onOpenGoalDialog,
       resolveActiveComposerTrigger,
       composerDraftTarget,
@@ -3297,11 +3135,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
     event: KeyboardEvent,
   ) => {
-    if (key === "Tab" && event.shiftKey) {
-      if (selectedProvider === "gemini") return false;
-      cycleComposerInteractionMode();
-      return true;
-    }
+    if (key === "Tab" && event.shiftKey) return false;
     const { trigger } = resolveActiveComposerTrigger();
     const menuIsActive = composerMenuOpenRef.current || trigger !== null;
     if (menuIsActive) {
@@ -3584,9 +3418,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const handleInterruptPrimaryAction = useCallback(() => {
     void onInterrupt();
   }, [onInterrupt]);
-  const handleImplementPlanInNewThreadPrimaryAction = useCallback(() => {
-    void onImplementPlanInNewThread();
-  }, [onImplementPlanInNewThread]);
   const scheduleComposerCollapseCheck = useCallback(() => {
     if (!isOnScreenKeyboardDevice) {
       return;
@@ -4096,13 +3927,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   {...(onResolveInteractionUrl ? { onResolveInteractionUrl } : {})}
                 />
               </div>
-            ) : showPlanFollowUpPrompt && activeProposedPlan ? (
-              <div key={`plan:${activeProposedPlan.id}`} className={COMPOSER_PANEL_CLASS_NAME}>
-                <ComposerPlanFollowUpBanner
-                  key={activeProposedPlan.id}
-                  planTitle={proposedPlanTitle(activeProposedPlan.planMarkdown) ?? null}
-                />
-              </div>
             ) : null)}
 
           {isComposerCollapsedMobile && activePendingApproval ? (
@@ -4182,8 +4006,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       connectingStopAvailable={connectingStopAvailable}
                       backgroundStopAvailable={backgroundStopAvailable}
                       stopInFlight={stopInFlight}
-                      showPlanFollowUpPrompt={false}
-                      promptHasText={false}
                       isSendBusy={isComposerPrimaryActionBusy}
                       isConnecting={isConnecting}
                       isEnvironmentUnavailable={environmentUnavailable !== null}
@@ -4194,7 +4016,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
-                      onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                     />
                   ) : null}
                 </div>
@@ -4499,41 +4320,34 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     ? uiText("Approve or decline to continue", undefined, undefined, uiLocale)
                     : activePendingProgress
                       ? uiPresentation.getPENDING_ANSWER_PLACEHOLDER()
-                      : showPlanFollowUpPrompt && activeProposedPlan
+                      : environmentUnavailable
                         ? uiText(
-                            "Add feedback, or leave blank to implement",
-                            undefined,
+                            "{state, select, connecting {{environment} is connecting} other {{environment} is disconnected}}",
+                            {
+                              environment: environmentUnavailable.label,
+                              state:
+                                environmentUnavailable.connectionState === "connecting"
+                                  ? "connecting"
+                                  : "disconnected",
+                            },
                             undefined,
                             uiLocale,
                           )
-                        : environmentUnavailable
-                          ? uiText(
-                              "{state, select, connecting {{environment} is connecting} other {{environment} is disconnected}}",
-                              {
-                                environment: environmentUnavailable.label,
-                                state:
-                                  environmentUnavailable.connectionState === "connecting"
-                                    ? "connecting"
-                                    : "disconnected",
-                              },
-                              undefined,
-                              uiLocale,
-                            )
-                          : phase === "disconnected" && (activeThread?.messages.length ?? 0) > 0
-                            ? uiText("Ask for follow-up changes…", undefined, undefined, uiLocale)
-                            : composerSkillsSupported
-                              ? uiText(
-                                  "Ask anything · @ files · $ skills · / commands",
-                                  undefined,
-                                  undefined,
-                                  uiLocale,
-                                )
-                              : uiText(
-                                  "Ask anything · @ files · / commands",
-                                  undefined,
-                                  undefined,
-                                  uiLocale,
-                                )
+                        : phase === "disconnected" && (activeThread?.messages.length ?? 0) > 0
+                          ? uiText("Ask for follow-up changes…", undefined, undefined, uiLocale)
+                          : composerSkillsSupported
+                            ? uiText(
+                                "Ask anything · @ files · $ skills · / commands",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )
+                            : uiText(
+                                "Ask anything · @ files · / commands",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )
                 }
                 disabled={composerEditorDisabled}
                 cafeSecretTone={cafeSecrets.issue ? "error" : "secret"}
@@ -4573,10 +4387,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     connectingStopAvailable={connectingStopAvailable}
                     backgroundStopAvailable={backgroundStopAvailable}
                     stopInFlight={stopInFlight}
-                    showPlanFollowUpPrompt={
-                      pendingUserInputs.length === 0 && showPlanFollowUpPrompt
-                    }
-                    promptHasText={prompt.trim().length > 0}
                     isSendBusy={isComposerPrimaryActionBusy}
                     isQueueEditing={props.queueEditing ?? false}
                     isConnecting={isConnecting}
@@ -4588,7 +4398,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
-                    onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                   />
                 </div>
               ) : null}
@@ -4677,15 +4486,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
                 <CompactComposerControlsMenu
                   showPlanSidebar={showPlanSidebarToggle}
-                  provider={selectedProvider}
-                  interactionMode={interactionMode}
-                  planSidebarLabel={planSidebarLabel}
                   planSidebarOpen={planSidebarOpen}
-                  runtimeMode={runtimeMode}
-                  showInteractionModeToggle={
-                    composerProviderControls.showInteractionModeToggle ||
-                    selectedProviderUsesNativePermissionModes
-                  }
                   showGoalControl={goalControlsSupported}
                   goalStatus={activeThread?.goal?.status ?? null}
                   traitsMenuContent={providerTraitsMenuContent}
@@ -4698,12 +4499,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       ? composerProviderState.traitsTriggerLabel
                       : null
                   }
-                  onToggleInteractionMode={cycleComposerInteractionMode}
-                  onNativePermissionModeChange={handleNativePermissionModeChange}
                   onTogglePlanSidebar={togglePlanSidebar}
-                  onRuntimeModeChange={handleRuntimeModeChange}
-                  geminiPermissionModeBusy={geminiPermissionModeBusy}
-                  geminiBypassMatchesAccount={geminiBypassInstanceId === selectedInstanceId}
                   onOpenGoal={onOpenGoalDialog}
                   open={isComposerControlsMenuOpen}
                   onOpenChange={setIsComposerControlsMenuOpen}
@@ -4713,7 +4509,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     key={`${environmentId}:${activeThreadId}`}
                     environmentId={environmentId}
                     threadId={isServerThread ? activeThreadId : null}
-                    runtimeMode={runtimeMode}
+                    runtimeMode={activeThread?.runtimeMode ?? runtimeMode}
                     draftEnabled={composerDraft.computerUseEnabled === true}
                     draftRevision={composerDraft.computerUseRevision}
                     onActivityChange={setComputerUseActivity}
@@ -4800,8 +4596,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   connectingStopAvailable={connectingStopAvailable}
                   backgroundStopAvailable={backgroundStopAvailable}
                   stopInFlight={stopInFlight}
-                  showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
-                  promptHasText={prompt.trim().length > 0}
                   isSendBusy={isComposerPrimaryActionBusy}
                   isQueueEditing={props.queueEditing ?? false}
                   isConnecting={isConnecting}
@@ -4815,7 +4609,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
-                  onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                 />
               </div>
             </div>

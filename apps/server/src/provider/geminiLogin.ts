@@ -195,6 +195,7 @@ export const makeGeminiLogin = Effect.fn("makeGeminiLogin")(function* <QualifyEr
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly fs: FileSystem.FileSystem;
   readonly hasSessions: Effect.Effect<boolean>;
+  readonly hasVerificationRequired?: () => boolean;
   readonly refresh: Effect.Effect<GeminiLoginRefreshResult>;
 }) {
   const instanceScope = yield* Effect.scope;
@@ -222,7 +223,10 @@ export const makeGeminiLogin = Effect.fn("makeGeminiLogin")(function* <QualifyEr
       if (activeSubmission === current) activeSubmission = undefined;
     });
 
-  const loginDeviceCode = <SessionError>(hasOwnedSessions: Effect.Effect<boolean, SessionError>) =>
+  const loginDeviceCode = <SessionError>(
+    hasOwnedSessions: Effect.Effect<boolean, SessionError>,
+    loginOptions?: { readonly forceLogin?: boolean },
+  ) =>
     Stream.callback<ServerProviderDeviceLoginEvent, ProviderAdapterValidationError>(
       (queue) =>
         Effect.gen(function* () {
@@ -231,6 +235,28 @@ export const makeGeminiLogin = Effect.fn("makeGeminiLogin")(function* <QualifyEr
             if (pending) return yield* invalid(GEMINI_LOGIN_ERRORS.pending);
             pending = true;
             yield* Effect.gen(function* () {
+              // When the current Google sign-in only needs additional account
+              // verification, refresh directly to obtain a fresh verification
+              // link without closing chats or forcing a redundant OAuth login.
+              if (!loginOptions?.forceLogin && options.hasVerificationRequired?.() === true) {
+                const refreshed = yield* options.refresh.pipe(
+                  Effect.mapError(() => invalid(GEMINI_LOGIN_ERRORS.account)),
+                );
+                if (refreshed.authenticated) {
+                  yield* Deferred.succeed(started, undefined);
+                  yield* Queue.offer(queue, { type: "authenticated" });
+                  return;
+                }
+                if (refreshed.verificationUrl) {
+                  yield* Deferred.succeed(started, undefined);
+                  yield* Queue.offer(queue, {
+                    type: "verification-required",
+                    verificationUrl: refreshed.verificationUrl,
+                  });
+                  return;
+                }
+              }
+
               const assertIdle = Effect.gen(function* () {
                 if (
                   (yield* options.hasSessions) ||

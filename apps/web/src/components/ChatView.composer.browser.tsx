@@ -35,6 +35,7 @@ import {
   waitForElement,
   waitForURL,
   waitForComposerEditor,
+  waitForComposerMenuItem,
   pressComposerKey,
   pressComposerUndo,
   waitForComposerText,
@@ -49,17 +50,13 @@ import {
   findComposerTaskProgressScroller,
   findSessionRail,
   expectEmptyScheduledSessionRailTasks,
-  findButtonByText,
-  waitForButtonByText,
-  waitForMenuRadioItemContainingText,
-  expectComposerInteractionMode,
   waitForServerConfigToApply,
   createDesktopBridgeForChatViewTests,
   mountChatView,
   createSnapshotWithRuntimeTaskProgress,
   createSnapshotWithActiveSubagent,
   createSnapshotWithCrossTurnActiveSubagent,
-  createSnapshotWithPlanFollowUpPrompt,
+  createSnapshotWithSavedPlan,
 } from "./ChatViewBrowser.shared";
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
@@ -86,7 +83,7 @@ import { describe, expect, it, vi } from "vitest";
 import { cdp, page, userEvent } from "vitest/browser";
 import { failBrowserWsRpc } from "../../test/wsRpcHarness";
 import { resetCafeSecretsCapabilityCacheForTests } from "../cafeSecrets/cafeSecretsClient";
-import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { useComposerDraftStore } from "../composerDraftStore";
 import { deskTabKey } from "../deskModel";
 import { useDeskStore } from "../deskStore";
 import {
@@ -1179,7 +1176,7 @@ describe("ChatView full app (composer)", () => {
       targetText: "Existing work",
       history,
       provider: "claudeAgent",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       sessionStatus: "error",
     });
     return {
@@ -1550,8 +1547,6 @@ describe("ChatView full app (composer)", () => {
           prompt: CLAUDE_SHORTER_CONTINUATION_PROMPT,
           modelSelectionByProvider: settingsBefore?.modelSelectionByProvider ?? {},
           activeProvider: settingsBefore?.activeProvider ?? null,
-          runtimeMode: settingsBefore?.runtimeMode ?? null,
-          interactionMode: settingsBefore?.interactionMode ?? null,
         });
         expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(
           CLAUDE_RESPONSE_LIMIT_MESSAGE,
@@ -1585,7 +1580,7 @@ describe("ChatView full app (composer)", () => {
             threadId: THREAD_ID,
             message: { text: "Give a concise answer from the existing work.", attachments: [] },
             modelSelection: responseLimitSelection,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             interactionMode: "default",
           });
         });
@@ -1652,8 +1647,6 @@ describe("ChatView full app (composer)", () => {
               images: [],
               files: [],
               modelSelection: responseLimitSelection,
-              runtimeMode: "approval-required",
-              interactionMode: "default",
             }),
           ).toBe(true);
         } else if (state === "approval" || state === "question") {
@@ -2344,15 +2337,7 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it.for([
-    "provider",
-    "model",
-    "options",
-    "runtime mode",
-    "interaction mode",
-    "images",
-    "files",
-  ] as const)(
+  it.for(["provider", "model", "options", "images", "files"] as const)(
     "abandons held Cafe Secret preparation after changing %s and preserves the current draft",
     async (change, context) => {
       const reference = "[CAFE_SECRET_0123456789abcdef0123456789abcdef]";
@@ -2527,12 +2512,6 @@ describe("ChatView full app (composer)", () => {
               ]),
             );
             break;
-          case "runtime mode":
-            store.setRuntimeMode(THREAD_REF, "approval-required");
-            break;
-          case "interaction mode":
-            store.setInteractionMode(THREAD_REF, "plan");
-            break;
           case "images":
             store.removeImage(THREAD_REF, image.id);
             store.addImages(THREAD_REF, [
@@ -2561,8 +2540,6 @@ describe("ChatView full app (composer)", () => {
         expect(preserved.files).toBe(latest.files);
         expect(preserved.activeProvider).toBe(latest.activeProvider);
         expect(preserved.modelSelectionByProvider).toBe(latest.modelSelectionByProvider);
-        expect(preserved.runtimeMode).toBe(latest.runtimeMode);
-        expect(preserved.interactionMode).toBe(latest.interactionMode);
         expect((await owner.own("editor", waitForComposerEditor)).textContent).toBe(prompt);
         expect(document.body.textContent).not.toContain(reference);
         expect(
@@ -2997,115 +2974,6 @@ describe("ChatView full app (composer)", () => {
     },
   );
 
-  it("temporarily hides an authored plan during implementation without persisting a closed preference", async () => {
-    useUiStateStore.setState({
-      threadPlanSidebarOpenById: {},
-    });
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotWithPlanFollowUpPrompt(),
-      resolveRpc: (body) => {
-        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
-          return { sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1 };
-        }
-        return undefined;
-      },
-    });
-
-    const publishThreadSnapshot = (nextSnapshot: OrchestrationReadModel): void => {
-      const nextThread = nextSnapshot.threads.find((thread) => thread.id === THREAD_ID);
-      if (!nextThread) {
-        throw new Error("Sequential plan regression fixture is missing its active thread.");
-      }
-      const snapshotSequence = chatViewFixture.fixture.snapshot.snapshotSequence + 1;
-      chatViewFixture.fixture.snapshot = {
-        ...nextSnapshot,
-        snapshotSequence,
-      };
-      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
-        kind: "snapshot",
-        snapshot: {
-          snapshotSequence,
-          thread: nextThread,
-        },
-      });
-    };
-
-    try {
-      // The completed authored plan still follows the normal auto-open path.
-      await vi.waitFor(
-        () => {
-          expect(document.querySelector('button[aria-label="Close plan sidebar"]')).not.toBeNull();
-          expect(document.body.textContent).toContain("Follow-up plan");
-          expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      const implementButton = await waitForButtonByText("Implement");
-      implementButton.click();
-      await vi.waitFor(
-        () => {
-          const implementationDispatch = wsRequests.find(
-            (request) =>
-              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-              request.type === "thread.turn.start" &&
-              request.interactionMode === "default",
-          );
-          expect(implementationDispatch).toMatchObject({
-            _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
-            type: "thread.turn.start",
-            sourceProposedPlan: {
-              threadId: THREAD_ID,
-              planId: "plan-follow-up-browser-test",
-            },
-          });
-          // Local dispatch hides the panel immediately, but that suppression
-          // is not a user preference and must never overwrite the stored true.
-          expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
-          expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      publishThreadSnapshot(createSnapshotWithRuntimeTaskProgress({ withAuthoredPlan: true }));
-      await vi.waitFor(
-        () => {
-          expect(findComposerTaskProgressTrigger()).not.toBeNull();
-          expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
-          expect(
-            document.querySelector(
-              'button[title="Show plan sidebar"], button[title="Hide plan sidebar"]',
-            ),
-          ).toBeNull();
-          expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      // Once there is no active runtime turn, the next authored plan is
-      // visible again under the unchanged open preference.
-      publishThreadSnapshot(
-        createSnapshotWithPlanFollowUpPrompt({
-          planMarkdown: "# Future authored plan\n\n- Preserve plan auto-open behavior.",
-        }),
-      );
-      await vi.waitFor(
-        () => {
-          expect(document.querySelector('button[aria-label="Close plan sidebar"]')).not.toBeNull();
-          expect(document.body.textContent).toContain("Future authored plan");
-          expect(findComposerTaskProgressTrigger()?.getAttribute("aria-label")).toBe(
-            "Tasks and scheduled follow-ups. Show task list",
-          );
-          expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
   it("docks the runtime checklist and context usage into the session rail on a wide viewport", async (context) => {
     const owner = createChatViewCallerOwner(context, mountChatView, {
       label: "composer-rail-docking",
@@ -3363,7 +3231,7 @@ describe("ChatView full app (composer)", () => {
     useUiStateStore.setState({ sessionRailDocked: true });
     const mounted = await mountChatView({
       viewport: WIDE_FOOTER_VIEWPORT,
-      snapshot: createSnapshotWithPlanFollowUpPrompt(),
+      snapshot: createSnapshotWithSavedPlan(),
     });
 
     try {
@@ -4745,165 +4613,49 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("toggles plan mode with Shift+Tab only while the composer is focused", async () => {
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-target-hotkey" as MessageId,
-        targetText: "hotkey target",
-        history: "essential",
-      }),
+  it("uses normal keyboard navigation and sends former workflow commands as ordinary input", async (context) => {
+    const caller = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-single-workflow",
     });
-
-    try {
-      await expectComposerInteractionMode("Build");
-      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-
-      window.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Tab",
-          shiftKey: true,
-          bubbles: true,
-          cancelable: true,
+    await caller.run(async () => {
+      await caller.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("msg-user-single-workflow"),
+          targetText: "Existing chat",
+          history: "essential",
+          runtimeMode: "full-access",
         }),
-      );
-      await waitForLayout();
-
-      await expectComposerInteractionMode("Build");
-
-      const composerEditor = await waitForComposerEditor();
-      composerEditor.focus();
-      composerEditor.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Tab",
-          shiftKey: true,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-
-      await expectComposerInteractionMode("Plan");
-
-      composerEditor.focus();
-      composerEditor.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Tab",
-          shiftKey: true,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-
-      await expectComposerInteractionMode("Build");
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("keeps Claude permission modes in options and cycles them with Shift+Tab", async () => {
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-target-claude-mode-hotkey" as MessageId,
-        targetText: "claude mode hotkey target",
-        history: "essential",
-        provider: "claudeAgent",
-        runtimeMode: "approval-required",
-      }),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          providers: [
-            ...nextFixture.serverConfig.providers,
-            {
-              driver: ProviderDriverKind.make("claudeAgent"),
-              instanceId: ProviderInstanceId.make("claudeAgent"),
-              enabled: true,
-              installed: true,
-              version: "2.1.216",
-              status: "ready",
-              auth: { status: "authenticated" },
-              checkedAt: NOW_ISO,
-              models: [
-                {
-                  slug: "claude-opus-4-8",
-                  name: "Claude Opus 4.8",
-                  isCustom: false,
-                  capabilities: createModelCapabilities({ optionDescriptors: [] }),
-                },
-              ],
-              slashCommands: [],
-              skills: [],
-            },
-          ],
-        };
-      },
-    });
-
-    try {
-      const footer = await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
-        "Unable to find composer footer.",
-      );
-      expect(
-        Array.from(footer.querySelectorAll("button")).some((button) =>
-          ["Ask permissions", "Accept edits", "Plan", "Auto", "Bypass permissions"].includes(
-            button.textContent?.trim() ?? "",
-          ),
-        ),
-      ).toBe(false);
-
-      await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-      // Routine descriptions moved into tooltips; Bypass keeps its warning visible.
-      await waitForMenuRadioItemContainingText("Ask permissions");
-      await waitForMenuRadioItemContainingText("Accept edits");
-      expect(
-        (await waitForMenuRadioItemContainingText("Bypass permissions")).textContent,
-      ).toContain("Run without permission checks");
-      await userEvent.keyboard("{Escape}");
-      await vi.waitFor(() => {
-        expect(document.querySelector('[data-slot="menu-popup"]')).toBeNull();
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
       });
+      const editor = await caller.own("editor", () => waitForComposerEditor());
+      editor.focus();
+      await caller.own("input", () => userEvent.keyboard("{Shift>}{Tab}{/Shift}"));
+      expect(document.activeElement).not.toBe(editor);
 
-      const composerEditor = await waitForComposerEditor();
-      const expectedModes = [
-        {
-          runtimeMode: "auto-accept-edits",
-          interactionMode: "default",
-        },
-        {
-          runtimeMode: "auto-accept-edits",
-          interactionMode: "plan",
-        },
-        {
-          runtimeMode: "auto-accept-edits",
-          interactionMode: "auto",
-        },
-        {
-          runtimeMode: "approval-required",
-          interactionMode: "default",
-        },
-      ] as const;
+      const prompt = page.getByTestId("composer-editor");
+      await caller.own("prompt", () => prompt.fill("/"));
+      await caller.own("picker", () => waitForComposerMenuItem("slash:model"));
+      expect(document.querySelector('[data-composer-item-id="slash:plan"]')).toBeNull();
+      expect(document.querySelector('[data-composer-item-id="slash:default"]')).toBeNull();
 
-      for (const expected of expectedModes) {
-        composerEditor.focus();
-        composerEditor.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "Tab",
-            shiftKey: true,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-        await vi.waitFor(() => {
-          const draft = useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY];
-          expect(draft?.runtimeMode ?? "approval-required").toBe(expected.runtimeMode);
-          expect(draft?.interactionMode ?? "default").toBe(expected.interactionMode);
-        });
-      }
-    } finally {
-      await mounted.cleanup();
-    }
+      await caller.own("prompt", () => prompt.fill("/plan"));
+      const send = await caller.own("send-target", () => waitForSendButton());
+      caller.assertActive();
+      send.click();
+      await caller.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            message: { text: "/plan", attachments: [] },
+          });
+        }),
+      );
+      expect(wsRequests.some((body) => body.type === "thread.interaction-mode.set")).toBe(false);
+    });
   });
 
   it("surrounds selected plain text and preserves the inner selection for repeated wrapping", async () => {

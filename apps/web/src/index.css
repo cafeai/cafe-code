@@ -419,37 +419,27 @@ body::after {
   background-size: 256px 256px;
 }
 
+/* Each segment advances at 15 steps per second at the default 60s duration.
+   Keep the steps proportional to the fade and drift intervals. */
 @keyframes cafe-sidebar-star-drift {
   0% {
     opacity: 0;
     transform: translate3d(0, 0, 0);
+    animation-timing-function: steps(36, end);
   }
   4% {
     opacity: var(--cafe-sidebar-star-opacity);
     transform: translate3d(-2px, -4px, 0);
+    animation-timing-function: steps(828, end);
   }
   96% {
     opacity: var(--cafe-sidebar-star-opacity);
     transform: translate3d(-40px, -92px, 0);
+    animation-timing-function: steps(36, end);
   }
   100% {
     opacity: 0;
     transform: translate3d(-42px, -96px, 0);
-  }
-}
-
-@keyframes cafe-sidebar-nebula-drift {
-  0% {
-    opacity: 0.34;
-    transform: translate3d(-2%, 1%, 0) scale(1);
-  }
-  50% {
-    opacity: 0.5;
-    transform: translate3d(2%, -1%, 0) scale(1.04);
-  }
-  100% {
-    opacity: 0.38;
-    transform: translate3d(1%, 2%, 0) scale(1.02);
   }
 }
 
@@ -544,8 +534,6 @@ body::after {
       transparent 70%
     );
   opacity: 0.42;
-  animation: cafe-sidebar-nebula-drift 23.333s ease-in-out infinite alternate;
-  will-change: transform, opacity;
 }
 
 .dark .cafe-thread-sidebar [data-slot="sidebar-inner"] {
@@ -917,7 +905,6 @@ body::after {
     radial-gradient(ellipse at 82% 80%, rgba(132, 142, 156, 0.22), transparent 38%),
     linear-gradient(132deg, transparent 20%, rgba(76, 176, 205, 0.14) 48%, transparent 70%);
   opacity: 0.5;
-  animation: cafe-sidebar-nebula-drift 23.333s ease-in-out infinite alternate;
 }
 
 .dark .cafe-followup-queue {
@@ -964,36 +951,18 @@ body::after {
   background-color: rgba(109, 236, 255, 0.08);
 }
 
-html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
+[data-slot="sidebar"][data-collapsible="offcanvas"]
   .cafe-thread-sidebar
   [data-slot="sidebar-inner"]::before,
-html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
-  .cafe-thread-sidebar
-  [data-slot="sidebar-inner"]::after,
-html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
-  .cafe-followup-queue::before,
-html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
-  .cafe-followup-queue::after,
-html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
-  .cafe-thread-sidebar
-  [data-slot="sidebar-inner"]::before,
-html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
-  .cafe-thread-sidebar
-  [data-slot="sidebar-inner"]::after,
-html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
-  .cafe-followup-queue::before,
-html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
-  .cafe-followup-queue::after,
 html[data-cafe-background-animations="paused"]:is(
     [data-cafe-visibility="hidden"],
     [data-cafe-window-focus="blurred"]
   )
-  .cafe-sidebar-surface::before,
-html[data-cafe-background-animations="paused"]:is(
-    [data-cafe-visibility="hidden"],
-    [data-cafe-window-focus="blurred"]
-  )
-  .cafe-sidebar-surface::after,
+  :is(
+    .cafe-thread-sidebar [data-slot="sidebar-inner"],
+    .cafe-followup-queue,
+    .cafe-sidebar-surface
+  )::before,
 html[data-cafe-background-animations="paused"]:is(
     [data-cafe-visibility="hidden"],
     [data-cafe-window-focus="blurred"]
@@ -1013,11 +982,8 @@ html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"] {
 
 @media (prefers-reduced-motion: reduce) {
   .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
-  .cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
   .cafe-sidebar-surface::before,
-  .cafe-sidebar-surface::after,
-  .cafe-followup-queue::before,
-  .cafe-followup-queue::after {
+  .cafe-followup-queue::before {
     animation: none;
   }
 }

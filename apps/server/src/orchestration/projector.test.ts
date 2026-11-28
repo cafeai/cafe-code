@@ -1114,7 +1114,7 @@ describe("orchestration projector", () => {
     });
   });
 
-  it("updates canonical thread runtime mode from thread.runtime-mode-set", async () => {
+  it("keeps Full access when replaying a legacy thread.runtime-mode-set event", async () => {
     const createdAt = "2026-02-23T08:00:00.000Z";
     const updatedAt = "2026-02-23T08:00:05.000Z";
     const model = createEmptyReadModel(createdAt);
@@ -1166,7 +1166,7 @@ describe("orchestration projector", () => {
       ),
     );
 
-    expect(afterUpdate.threads[0]?.runtimeMode).toBe("approval-required");
+    expect(afterUpdate.threads[0]?.runtimeMode).toBe("full-access");
     expect(afterUpdate.threads[0]?.updatedAt).toBe(updatedAt);
   });
 

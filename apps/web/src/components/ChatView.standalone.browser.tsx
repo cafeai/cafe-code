@@ -30,16 +30,14 @@ import {
   waitForComposerEditor,
   waitForSendButton,
   findSessionRail,
-  waitForButtonByText,
+  findComposerProviderModelPicker,
   waitForServerConfigToApply,
   mountChatView,
   createSnapshotWithActiveSubagent,
-  createSnapshotWithPlanFollowUpPrompt,
 } from "./ChatViewBrowser.shared";
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
   CheckpointRef,
-  ClientOrchestrationCommand,
   EnvironmentId,
   EventId,
   MessageId,
@@ -53,8 +51,7 @@ import {
   WS_METHODS,
 } from "@cafecode/contracts";
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
-import * as Schema from "effect/Schema";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { deskTabKey } from "../deskModel";
@@ -802,250 +799,153 @@ describe("ChatView full app (standalone)", () => {
         }
       },
     );
-    it.each(["plan follow-up", "native review"] as const)(
-      "dispatches direct %s actions without clearing unconfirmed inherited account policy",
-      async (action) => {
-        const original = createSnapshotWithPlanFollowUpPrompt();
-        const base = {
-          ...original,
-          threads: original.threads.map((thread) => ({
-            ...thread,
-            session: thread.session ? { ...thread.session, providerInstanceId: account } : null,
-          })),
-        };
-        const mounted = await mountChatView({
-          viewport: WIDE_FOOTER_VIEWPORT,
-          snapshot: base,
-          configureFixture: (next) => {
-            configureLiveDefaults(next);
-            next.serverConfig = {
-              ...next.serverConfig,
-              providers: next.serverConfig.providers.map((provider) => ({
-                ...provider,
-                runtimeCapabilities: {
-                  liveSteer: "unsupported",
-                  threadGoals: "unsupported",
-                  ...provider.runtimeCapabilities,
-                  subagentConcurrency: false,
-                },
-              })),
-            };
+    it("dispatches native review without clearing unconfirmed inherited account policy", async () => {
+      const base = policySnapshot(undefined, 12);
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: base,
+        configureFixture: (next) => {
+          configureLiveDefaults(next);
+          next.serverConfig = {
+            ...next.serverConfig,
+            providers: next.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "unsupported",
+                threadGoals: "unsupported",
+                ...provider.runtimeCapabilities,
+                subagentConcurrency: false,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+      });
+      try {
+        await waitForServerConfigToApply();
+        const prompt = "Keep this unsent review draft";
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+        await page.getByRole("button", { name: "Code review", exact: true }).click();
+        await page.getByRole("button", { name: "Start review", exact: true }).click();
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(prompt);
+        await vi.waitFor(() =>
+          expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1),
+        );
+        expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+          threadId: THREAD_ID,
+          message: {
+            text: "Code review: uncommitted changes",
+            attachments: [],
           },
-          resolveRpc: (body) =>
-            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+          codexReview: { type: "uncommittedChanges" },
         });
-        try {
-          await waitForServerConfigToApply();
-          const originalPlan = selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans;
-          if (action === "plan follow-up") {
-            (await waitForButtonByText("Implement")).click();
-          } else {
-            const prompt = "Keep this unsent review draft";
-            useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
-            await page.getByRole("button", { name: "Code review", exact: true }).click();
-            await page.getByRole("button", { name: "Start review", exact: true }).click();
-            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        expect(
+          wsRequests.some(
+            (body) => body.type === "thread.create" || body.type === "thread.session.stop",
+          ),
+        ).toBe(false);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
+          base.threads[0]!.subagentLimits,
+        );
+        expect(
+          getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
+        ).toBe(12);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+    it("dispatches a send exactly once after optional policy support changes during preparation", async (context) => {
+      // An older owner can still return a saved Plan setting during preparation.
+      const original = policySnapshot(undefined, 12);
+      const base = {
+        ...original,
+        threads: original.threads.map((thread) => ({
+          ...thread,
+          interactionMode: "plan" as const,
+        })),
+      };
+      let release!: (value: { sequence: number }) => void;
+      const pending = new Promise<{ sequence: number }>((resolve) => {
+        release = resolve;
+      });
+      let released = false;
+      const releasePreparation = () => {
+        if (released) return;
+        released = true;
+        release({ sequence: 2 });
+      };
+      // Register the exact held ACK and caller lifetime before mounting can
+      // yield; retirement drains the original native actions before unmount.
+      const caller = createChatViewCallerOwner(context, mountChatView, {
+        label: "live-account-preparation",
+        beforeDrain: releasePreparation,
+      });
+      await caller.mount({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: base,
+        configureFixture: configureLiveDefaults,
+        resolveRpc: (body) => {
+          if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
+          return body.type === "thread.interaction-mode.set" ? pending : { sequence: 2 };
+        },
+      });
+      const prompt = "Keep this exact unsent policy-race draft";
+      try {
+        await caller.own("config", () => waitForServerConfigToApply());
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+        await caller.own("prompt", () =>
+          vi.waitFor(() =>
+            expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
               prompt,
-            );
-          }
-          await vi.waitFor(() =>
+            ),
+          ),
+        );
+        const sendButton = await caller.own("send-target", () => waitForSendButton());
+        caller.assertActive();
+        caller.mark("send");
+        sendButton.click();
+        await caller.own("request", () =>
+          vi.waitFor(() =>
+            expect(
+              wsRequests.find((body) => body.type === "thread.interaction-mode.set"),
+            ).toMatchObject({ interactionMode: "default" }),
+          ),
+        );
+        expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+        await caller.own("config", () => revokeLiveAccountCapability());
+        releasePreparation();
+        caller.mark("ack");
+        await caller.own("receipt", () =>
+          vi.waitFor(() =>
             expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1),
-          );
-          expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
-            threadId: THREAD_ID,
-            message: {
-              text:
-                action === "native review"
-                  ? "Code review: uncommitted changes"
-                  : "PLEASE IMPLEMENT THIS PLAN:\n# Follow-up plan\n\n- Keep the composer footer stable on resize.",
-              attachments: [],
-            },
-            ...(action === "native review" ? { codexReview: { type: "uncommittedChanges" } } : {}),
-          });
-          expect(
-            wsRequests.some(
-              (body) => body.type === "thread.create" || body.type === "thread.session.stop",
-            ),
-          ).toBe(false);
-          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
-            base.threads[0]!.subagentLimits,
-          );
-          expect(
-            getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
-          ).toBe(12);
-          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans).toEqual(
-            originalPlan,
-          );
-        } finally {
-          await mounted.cleanup();
-        }
-      },
-    );
-    it.for(["ordinary send", "plan follow-up", "plan new chat"] as const)(
-      "dispatches %s exactly once after optional policy support changes during preparation",
-      async (action, context) => {
-        const original =
-          action === "ordinary send"
-            ? policySnapshot(undefined, 12)
-            : createSnapshotWithPlanFollowUpPrompt();
-        const base = {
-          ...original,
-          threads: original.threads.map((thread) => ({
-            ...thread,
-            subagentLimits: {},
-            session: thread.session
-              ? { ...thread.session, providerInstanceId: account, maxConcurrentSubagents: 12 }
-              : null,
-          })),
-        };
-        const blockedType =
-          action === "ordinary send"
-            ? "thread.runtime-mode.set"
-            : action === "plan follow-up"
-              ? "thread.interaction-mode.set"
-              : "thread.create";
-        let release!: (value: { sequence: number }) => void;
-        const pending = new Promise<{ sequence: number }>((resolve) => {
-          release = resolve;
+          ),
+        );
+        const submitted = wsRequests.find((body) => body.type === "thread.turn.start")!;
+        expect(submitted).toMatchObject({
+          threadId: THREAD_ID,
+          interactionMode: "default",
+          message: { text: prompt, attachments: [] },
         });
-        let released = false;
-        const releasePreparation = () => {
-          if (released) return;
-          released = true;
-          release({ sequence: 2 });
-        };
-        // Register the exact held ACK and caller lifetime before mounting can
-        // yield; retirement drains the original native actions before unmount.
-        const caller = createChatViewCallerOwner(context, mountChatView, {
-          label: "live-account-preparation",
-          beforeDrain: releasePreparation,
-        });
-        const mounted = await caller.mount({
-          viewport: WIDE_FOOTER_VIEWPORT,
-          snapshot: base,
-          configureFixture: configureLiveDefaults,
-          resolveRpc: (body) => {
-            if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
-            if (body.type === "thread.create") {
-              const command = Schema.decodeUnknownSync(ClientOrchestrationCommand)(body);
-              if (command.type !== "thread.create") {
-                throw new Error("Expected the exact synthetic thread-create command.");
-              }
-              const snapshotSequence = chatViewFixture.fixture.snapshot.snapshotSequence + 1;
-              chatViewFixture.fixture.snapshot = {
-                ...addThreadToSnapshot(chatViewFixture.fixture.snapshot, command.threadId),
-                snapshotSequence,
-              };
-              const created = chatViewFixture.fixture.snapshot.threads.find(
-                (thread) => thread.id === command.threadId,
-              )!;
-              rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
-                kind: "thread-upserted",
-                sequence: snapshotSequence,
-                thread: toShellThread(created),
-              });
-            }
-            return body.type === blockedType ? pending : { sequence: 2 };
-          },
-        });
-        const prompt = "Keep this exact unsent policy-race draft";
-        try {
-          await caller.own("config", () => waitForServerConfigToApply());
-          const originalPlan = selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans;
-          if (action === "ordinary send") {
-            useComposerDraftStore
-              .getState()
-              .setRuntimeMode(
-                THREAD_REF,
-                base.threads[0]!.runtimeMode === "approval-required"
-                  ? "full-access"
-                  : "approval-required",
-              );
-            useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
-            await caller.own("prompt", () =>
-              vi.waitFor(() =>
-                expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
-                  prompt,
-                ),
-              ),
-            );
-            const sendButton = await caller.own("send-target", () => waitForSendButton());
-            caller.assertActive();
-            caller.mark("send");
-            sendButton.click();
-          } else if (action === "plan follow-up") {
-            const implementButton = await caller.own("send-target", () =>
-              waitForButtonByText("Implement"),
-            );
-            caller.assertActive();
-            caller.mark("send");
-            implementButton.click();
-          } else {
-            await caller.own("controls", () =>
-              page.getByRole("button", { name: "Implementation actions", exact: true }).click(),
-            );
-            await caller.own("send", () =>
-              page.getByRole("menuitem", { name: "Implement in a new chat", exact: true }).click(),
-            );
-          }
-          await caller.own("request", () =>
-            vi.waitFor(() =>
-              expect(wsRequests.some((body) => body.type === blockedType)).toBe(true),
-            ),
-          );
-          expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
-          await caller.own("config", () => revokeLiveAccountCapability());
-          releasePreparation();
-          caller.mark("ack");
-          await caller.own("receipt", () =>
-            vi.waitFor(() =>
-              expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(
-                1,
-              ),
-            ),
-          );
-          const submitted = wsRequests.find((body) => body.type === "thread.turn.start")!;
-          expect(submitted).toMatchObject({
-            message: {
-              text:
-                action === "ordinary send"
-                  ? prompt
-                  : "PLEASE IMPLEMENT THIS PLAN:\n# Follow-up plan\n\n- Keep the composer footer stable on resize.",
-              attachments: [],
-            },
-          });
-          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans).toEqual(
-            originalPlan,
-          );
-          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
-          expect(
-            getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
-          ).toBe(24);
-          if (action === "plan new chat") {
-            const created = wsRequests.find((body) => body.type === "thread.create")!;
-            expect(submitted).toMatchObject({ threadId: created.threadId });
-            await caller.own("snapshot", () =>
-              startPromotedServerThreadViaDomainEvent(created.threadId as ThreadId),
-            );
-            await caller.own("closed", () =>
-              vi.waitFor(() =>
-                expect(mounted.router.state.location.pathname).toBe(
-                  serverThreadPath(created.threadId as ThreadId),
-                ),
-              ),
-            );
-          } else expect(submitted).toMatchObject({ threadId: THREAD_ID });
-          expect(wsRequests.some((body) => body.type === "thread.delete")).toBe(false);
-        } finally {
-          await caller.cleanup();
-        }
-      },
-    );
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
+        expect(
+          getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
+        ).toBe(24);
+        expect(wsRequests.some((body) => body.type === "thread.delete")).toBe(false);
+      } finally {
+        await caller.cleanup();
+      }
+    });
     it("settles one deferred queued send when optional live account policy support changes", async (context) => {
       const queue = createFollowUpQueuePersistence();
-      const base = policySnapshot(undefined, 12);
-      const queuedRuntime =
-        base.threads[0]!.runtimeMode === "approval-required" ? "full-access" : "approval-required";
+      const original = policySnapshot(undefined, 12);
+      const base = {
+        ...original,
+        threads: original.threads.map((thread) => ({
+          ...thread,
+          interactionMode: "plan" as const,
+        })),
+      };
       let release!: (value: { sequence: number }) => void;
       const pending = new Promise<{ sequence: number }>((resolve) => {
         release = resolve;
@@ -1078,8 +978,8 @@ describe("ChatView full app (standalone)", () => {
                   model: "gpt-5",
                   promptEffort: null,
                   modelSelection: createModelSelection(account, "gpt-5"),
-                  runtimeMode: queuedRuntime,
-                  interactionMode: "default",
+                  runtimeMode: "full-access",
+                  interactionMode: "plan",
                   queuedAt: isoAt(1000),
                   blockedReason: null,
                 },
@@ -1093,14 +993,16 @@ describe("ChatView full app (standalone)", () => {
           configureFixture: configureLiveDefaults,
           resolveRpc: (body) =>
             body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-              ? body.type === "thread.runtime-mode.set"
+              ? body.type === "thread.interaction-mode.set"
                 ? pending
                 : { sequence: 2 }
               : undefined,
         });
         await caller.own("request", () =>
           vi.waitFor(() =>
-            expect(wsRequests.some((body) => body.type === "thread.runtime-mode.set")).toBe(true),
+            expect(wsRequests.some((body) => body.type === "thread.interaction-mode.set")).toBe(
+              true,
+            ),
           ),
         );
         await caller.own("config", () => revokeLiveAccountCapability());
@@ -1113,6 +1015,7 @@ describe("ChatView full app (standalone)", () => {
         );
         expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
           threadId: THREAD_ID,
+          interactionMode: "default",
           message: { text: "Preserve this exact queued input", attachments: [] },
         });
         await caller.own("receipt", () =>
@@ -2141,10 +2044,8 @@ describe("ChatView full app (standalone)", () => {
         await expect
           .element(controls.getByRole("menuitem", { name: "Context window…", exact: true }))
           .toBeVisible();
-        await expect.element(controls.getByText("Mode", { exact: true })).toBeVisible();
-        const labels = page.getByRole("menu").element().textContent!;
+        const labels = controls.element().textContent!;
         expect(labels.indexOf("Subagent limit…")).toBeLessThan(labels.indexOf("Context window…"));
-        expect(labels.indexOf("Context window…")).toBeLessThan(labels.indexOf("Mode"));
         await page.getByRole("menuitem", { name: "Context window…", exact: true }).click();
         await contextInput().fill("1000000");
         await page.getByRole("button", { name: "Save", exact: true }).click();
@@ -2656,11 +2557,19 @@ describe("ChatView full app (standalone)", () => {
           useComposerDraftStore
             .getState()
             .setModelSelection(draftId, createModelSelection(otherAccount, model));
-          await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-          await expect
-            .element(page.getByRole("menuitem", { name: "Context window…", exact: true }))
-            .not.toBeInTheDocument();
-          await userEvent.keyboard("{Escape}");
+          await vi.waitFor(() =>
+            expect(findComposerProviderModelPicker()?.textContent).toContain(`Synthetic ${driver}`),
+          );
+          const controls = document.querySelector('button[aria-label="More composer controls"]');
+          if (controls !== null) {
+            await page.elementLocator(controls).click();
+            const menu = page.getByRole("menu");
+            await expect.element(menu).toBeVisible();
+            await expect
+              .element(menu.getByRole("menuitem", { name: "Context window…", exact: true }))
+              .not.toBeInTheDocument();
+            await userEvent.keyboard("{Escape}");
+          }
           expect(
             useComposerDraftStore.getState().getComposerDraft(draftId)?.codexContextWindowOverride,
           ).toBe(requested);
@@ -3434,133 +3343,6 @@ describe("ChatView full app (standalone)", () => {
         await mounted.cleanup();
       }
     });
-    it.each([
-      { supported: false, projectId: PROJECT_ID },
-      { supported: true, projectId: PROJECT_ID },
-      { supported: true, projectId: null },
-    ])(
-      "preserves saved policy when implementing a plan in a new chat (supported=$supported, projectId=$projectId)",
-      async ({ supported, projectId }) => {
-        const base = createSnapshotWithPlanFollowUpPrompt();
-        const requested = { codex: 6, claude: 8 };
-        const mounted = await mountChatView({
-          viewport: WIDE_FOOTER_VIEWPORT,
-          snapshot: {
-            ...base,
-            threads: base.threads.map((thread) => ({
-              ...thread,
-              projectId,
-              ...(projectId === null ? { branch: null, worktreePath: null } : {}),
-              subagentLimits: requested,
-            })),
-          },
-          configureFixture: (next) => {
-            configureLimitFixture(next);
-            if (!supported) {
-              next.serverConfig = {
-                ...next.serverConfig,
-                providers: next.serverConfig.providers.map((provider) => ({
-                  ...provider,
-                  runtimeCapabilities: { liveSteer: "unsupported", threadGoals: "unsupported" },
-                })),
-              };
-            }
-          },
-          resolveRpc: (body) => {
-            if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
-            if (body.type === "thread.create") {
-              const nextId = body.threadId as ThreadId;
-              const snapshotSequence = chatViewFixture.fixture.snapshot.snapshotSequence + 1;
-              chatViewFixture.fixture.snapshot = {
-                ...addThreadToSnapshot(chatViewFixture.fixture.snapshot, nextId),
-                snapshotSequence,
-              };
-              const created = chatViewFixture.fixture.snapshot.threads.find(
-                (thread) => thread.id === nextId,
-              )!;
-              const thread = {
-                ...created,
-                projectId,
-                ...(projectId === null ? { branch: null, worktreePath: null } : {}),
-                subagentLimits: requested,
-              };
-              chatViewFixture.fixture.snapshot = {
-                ...chatViewFixture.fixture.snapshot,
-                threads: chatViewFixture.fixture.snapshot.threads.map((entry) =>
-                  entry.id === nextId ? thread : entry,
-                ),
-              };
-              rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
-                kind: "thread-upserted",
-                sequence: snapshotSequence,
-                thread: { ...toShellThread(thread), subagentLimits: thread.subagentLimits },
-              });
-            }
-            return { sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1 };
-          },
-        });
-        const implementInNewChat = async () => {
-          await waitForElement(
-            () =>
-              document.querySelector<HTMLButtonElement>(
-                'button[aria-label="Implementation actions"]',
-              ),
-            "plan implementation actions",
-          );
-          await expect
-            .element(page.getByRole("button", { name: "Implementation actions", exact: true }))
-            .toBeVisible();
-          await page.getByRole("button", { name: "Implementation actions", exact: true }).click();
-          await page
-            .getByRole("menuitem", { name: "Implement in a new chat", exact: true })
-            .click();
-        };
-        try {
-          await waitForButtonByText("Implement");
-          await vi.waitFor(() =>
-            expect(
-              document.querySelector('[data-chat-composer-implement-actions="true"]'),
-              `Expected composer plan actions; thread mode=${selectThreadByRef(useStore.getState(), THREAD_REF)?.interactionMode}, draft mode=${useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.interactionMode}, prompt=${JSON.stringify(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt)}`,
-            ).not.toBeNull(),
-          );
-          await implementInNewChat();
-          await vi.waitFor(() => {
-            const create = wsRequests.find((body) => body.type === "thread.create");
-            const turn = wsRequests.find((body) => body.type === "thread.turn.start");
-            expect(wsRequests.filter((body) => body.type === "thread.create")).toHaveLength(1);
-            expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1);
-            expect(create).toMatchObject({
-              projectId,
-              runtimeMode: "full-access",
-              subagentLimits: requested,
-            });
-            expect(turn).toMatchObject({
-              threadId: create?.threadId,
-              runtimeMode: "full-access",
-              subagentLimits: requested,
-              message: {
-                text: "PLEASE IMPLEMENT THIS PLAN:\n# Follow-up plan\n\n- Keep the composer footer stable on resize.",
-                attachments: [],
-              },
-              sourceProposedPlan: { threadId: THREAD_ID, planId: "plan-follow-up-browser-test" },
-            });
-          });
-          const createdId = wsRequests.find((body) => body.type === "thread.create")!
-            .threadId as ThreadId;
-          // The ordinary server-start observation completes the existing
-          // navigation waiter; a bare command ACK is not a started chat.
-          await startPromotedServerThreadViaDomainEvent(createdId);
-          await vi.waitFor(() =>
-            expect(mounted.router.state.location.pathname).toBe(serverThreadPath(createdId)),
-          );
-          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
-            requested,
-          );
-        } finally {
-          await mounted.cleanup();
-        }
-      },
-    );
     it.each([false, true])(
       "uses current durable policy for a parked queue, including runtime downgrade=%s",
       async (downgraded) => {
@@ -4207,6 +3989,7 @@ describe("ChatView full app (standalone)", () => {
           ).toMatchObject({
             threadId: THREAD_ID,
             message: { text: "Continue standalone history" },
+            runtimeMode: "full-access",
           }),
         { timeout: 8_000, interval: 16 },
       );

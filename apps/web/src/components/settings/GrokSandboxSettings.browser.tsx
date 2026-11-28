@@ -97,8 +97,8 @@ describe("Grok sandbox consent in provider settings", () => {
     const dialog = page.getByRole("dialog", { name: "Use Grok without sandbox?" });
     await expect.element(dialog).toBeVisible();
     // The confirmation must disclose the missing OS boundary and that Ask
-    // permissions are not a substitute for it, plus the Full access, Plan and
-    // reload caveats.
+    // permissions do not provide an OS boundary. Chat and text generation
+    // sandbox behavior is also disclosed.
     await expect
       .element(dialog.getByText(/connection checks outside the OS sandbox/))
       .toBeVisible();
@@ -106,11 +106,13 @@ describe("Grok sandbox consent in provider settings", () => {
       .element(dialog.getByText(/Ask permissions, which don't replace a sandbox/))
       .toBeVisible();
     await expect.element(dialog.getByText(/send no chat prompt/)).toBeVisible();
-    await expect.element(dialog.getByText(/Chat access modes don't change/)).toBeVisible();
     await expect
-      .element(dialog.getByText(/select Full access; it also bypasses approval prompts/))
+      .element(
+        dialog.getByText(
+          "Chats use Full access. Text generation helpers still require a working sandbox.",
+        ),
+      )
       .toBeVisible();
-    await expect.element(dialog.getByText(/Plan and protected modes may still fail/)).toBeVisible();
     await expect
       .element(dialog.getByText(/may interrupt active chats\. Change it between sessions\./))
       .toBeVisible();

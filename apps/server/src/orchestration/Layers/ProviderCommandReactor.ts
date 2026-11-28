@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   type ChatAttachment,
   CommandId,
+  DEFAULT_RUNTIME_MODE,
   EventId,
   MessageId,
   type ModelSelection,
@@ -26,6 +27,7 @@ import {
   type RuntimeMode,
   TurnId,
   type ThreadTurnRuntimeRecovery,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
 } from "@cafecode/contracts";
 import {
   isTemporaryWorktreeBranch,
@@ -317,7 +319,11 @@ const serverCommandId = (tag: string): CommandId =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
-const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+function nativeChatInteractionMode(provider: ProviderDriverKind): ProviderInteractionMode {
+  // Gemini's session configuration reports Default. Its process still needs
+  // the explicit bypass launch flag for the exact configured Gemini account.
+  return provider === "gemini" ? "gemini-bypass" : DEFAULT_PROVIDER_INTERACTION_MODE;
+}
 /**
  * Placeholder titles that automatic title generation may replace. "New chat"
  * is the current default seed; "New thread" is the legacy seed that existing
@@ -1792,7 +1798,8 @@ const make = Effect.gen(function* () {
         (thread) =>
           thread.deletedAt === null &&
           thread.archivedAt === null &&
-          thread.goal?.status === "active",
+          thread.goal?.status === "active" &&
+          (thread.session === null || thread.session.runtimeMode === thread.runtimeMode),
       );
       yield* Effect.forEach(
         activeGoalThreads,
@@ -1832,7 +1839,6 @@ const make = Effect.gen(function* () {
       readonly project?: OrchestrationProjectShell;
       readonly activeSession?: ProviderSession | undefined;
       readonly activeSessionResolved?: boolean;
-      readonly interactionMode?: ProviderInteractionMode;
       /** Only an actual turn request may reconcile pending numeric execution policy. */
       readonly applySubagentPolicyForTurn?: boolean;
       /** Ordinary follow-up only, never a copied-history bootstrap or native review. */
@@ -1845,7 +1851,6 @@ const make = Effect.gen(function* () {
     }
 
     const desiredRuntimeMode = thread.runtimeMode;
-    const desiredInteractionMode = options?.interactionMode ?? thread.interactionMode;
     const requestedModelSelection = options?.modelSelection;
     const resolveActiveSession = (threadId: ThreadId) =>
       providerService
@@ -1907,13 +1912,7 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
-    if (desiredInteractionMode === "gemini-bypass" && preferredProvider !== "gemini") {
-      return yield* new ProviderAdapterRequestError({
-        provider: providerErrorLabel(preferredProvider),
-        method: "thread.turn.start",
-        detail: "Gemini Bypass permissions require a Gemini provider.",
-      });
-    }
+    const desiredInteractionMode = nativeChatInteractionMode(preferredProvider);
     const applySubagentPolicyForTurn = options?.applySubagentPolicyForTurn === true;
     const settingsForConcurrency = applySubagentPolicyForTurn
       ? yield* serverSettingsService.getSettings
@@ -2200,6 +2199,17 @@ const make = Effect.gen(function* () {
             detail: `Provider session '${session.threadId}' started without a provider instance id.`,
           });
         }
+        if (
+          session.runtimeMode !== desiredRuntimeMode ||
+          ((session.provider === "gemini" || session.provider === "grok") &&
+            (session.interactionMode ?? "default") !== desiredInteractionMode)
+        ) {
+          return yield* new ProviderAdapterRequestError({
+            provider: providerErrorLabel(session.provider),
+            method: "thread.turn.start",
+            detail: "The provider session did not adopt this chat's execution policy.",
+          });
+        }
         yield* setThreadSession({
           threadId,
           session: {
@@ -2210,7 +2220,7 @@ const make = Effect.gen(function* () {
                 : mapProviderSessionStatusToOrchestrationStatus(session.status),
             providerName: session.provider,
             providerInstanceId: session.providerInstanceId,
-            runtimeMode: desiredRuntimeMode,
+            runtimeMode: session.runtimeMode,
             subagentRuntimeId: session.subagentRuntimeId ?? null,
             ...(session.maxConcurrentSubagents !== undefined
               ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
@@ -2472,7 +2482,6 @@ const make = Effect.gen(function* () {
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
-    readonly interactionMode?: ProviderInteractionMode;
     readonly createdAt: string;
     readonly thread?: OrchestrationThread;
     readonly project?: OrchestrationProjectShell;
@@ -2553,7 +2562,6 @@ const make = Effect.gen(function* () {
       applySubagentPolicyForTurn: true,
       allowSubagentPolicyContinuation:
         input.codexReview === undefined && !shouldBootstrapProviderContext,
-      ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
     });
     if (input.modelSelection !== undefined && input.rememberModelSelection !== false) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -2663,7 +2671,7 @@ const make = Effect.gen(function* () {
       ...(providerInput ? { input: providerInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
-      ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      interactionMode: nativeChatInteractionMode(ensuredSession.provider),
     };
     // This cached routing read supplies only the user's configured account
     // label. It cannot launch a CLI probe, discover auth metadata or incur a
@@ -2948,6 +2956,73 @@ const make = Effect.gen(function* () {
         return;
       }
 
+      const geminiAlreadySettled =
+        activeProviderSession?.provider === "gemini" &&
+        (activeProviderSession.status !== "running" ||
+          activeProviderSession.activeTurnId !== input.turnId);
+      const latestTurnAlreadyTerminal =
+        thread?.latestTurn?.turnId === input.turnId &&
+        thread.latestTurn.state !== "running" &&
+        !replacesCompletedAggregateRoot;
+
+      if (geminiAlreadySettled || latestTurnAlreadyTerminal) {
+        const settledProviderName = activeProviderSession?.provider ?? currentSession?.providerName;
+        const settledProviderInstanceId =
+          activeProviderSession?.providerInstanceId ?? currentSession?.providerInstanceId;
+        if (
+          settledProviderName !== undefined &&
+          settledProviderName !== null &&
+          settledProviderInstanceId !== undefined &&
+          (currentSession?.providerName == null || currentSession.providerInstanceId === undefined)
+        ) {
+          const settledStatus =
+            currentSession?.status === "error" ||
+            currentSession?.status === "interrupted" ||
+            currentSession?.status === "stopped"
+              ? currentSession.status
+              : "ready";
+          const settledAt =
+            currentSession?.updatedAt ??
+            thread?.latestTurn?.completedAt ??
+            input.createdAt ??
+            DateTime.formatIso(yield* DateTime.now);
+          yield* setThreadSession({
+            threadId: input.threadId,
+            session: {
+              threadId: input.threadId,
+              status: settledStatus,
+              providerName: settledProviderName,
+              providerInstanceId: settledProviderInstanceId,
+              runtimeMode:
+                activeProviderSession?.runtimeMode ??
+                currentSession?.runtimeMode ??
+                thread?.runtimeMode ??
+                DEFAULT_RUNTIME_MODE,
+              activeTurnId: null,
+              lastError: currentSession?.lastError ?? null,
+              updatedAt: settledAt,
+            },
+            createdAt: settledAt,
+          });
+        }
+        yield* Effect.logWarning(
+          geminiAlreadySettled
+            ? "provider command reactor skipped stale Gemini sendTurn marker behind settled provider state"
+            : "provider command reactor skipped stale sendTurn marker for already terminal turn",
+          {
+            threadId: input.threadId,
+            turnId: input.turnId,
+            ...(geminiAlreadySettled
+              ? {
+                  providerStatus: activeProviderSession.status,
+                  providerActiveTurnId: activeProviderSession.activeTurnId ?? null,
+                }
+              : { latestTurnState: thread?.latestTurn?.state ?? null }),
+          },
+        );
+        return;
+      }
+
       if (
         currentSession?.status === "running" &&
         currentSession.activeTurnId !== null &&
@@ -2977,6 +3052,15 @@ const make = Effect.gen(function* () {
 
       const providerInstanceId =
         activeProviderSession?.providerInstanceId ?? currentSession?.providerInstanceId;
+      if (
+        !replacesCompletedAggregateRoot &&
+        currentSession?.status === "running" &&
+        currentSession.activeTurnId === input.turnId &&
+        currentSession.providerName === providerName &&
+        currentSession.providerInstanceId === providerInstanceId
+      ) {
+        return;
+      }
       const runtimeMode =
         activeProviderSession?.runtimeMode ??
         currentSession?.runtimeMode ??
@@ -3021,7 +3105,15 @@ const make = Effect.gen(function* () {
         ...(codexRootReplacement !== undefined ? { codexRootReplacement } : {}),
       });
       yield* codexRootReplacement === undefined
-        ? commitSession
+        ? commitSession.pipe(
+            Effect.catchIf(isSupersededSessionLifecycle, () =>
+              Effect.logInfo("provider command reactor preserved newer state after sendTurn ACK", {
+                threadId: input.threadId,
+                turnId: input.turnId,
+                outcome: "superseded-send-turn-marker",
+              }),
+            ),
+          )
         : commitSession.pipe(
             Effect.catchTag("OrchestrationCommandInvariantError", () =>
               // Admission rechecks the original durable steer intent and the
@@ -3050,6 +3142,7 @@ const make = Effect.gen(function* () {
       readonly turn: ProviderTurnStartResult;
       readonly intentCreatedAt: string;
       readonly supersededCompletedRootTurnId?: TurnId;
+      readonly expectedTurnStartIntentSequence?: number;
     }) {
       if (input.turn.clientCorrelationId !== undefined) {
         const acceptedAt = DateTime.formatIso(yield* DateTime.now);
@@ -3070,6 +3163,9 @@ const make = Effect.gen(function* () {
         threadId: input.threadId,
         turnId: input.turn.turnId,
         createdAt: input.intentCreatedAt,
+        ...(input.expectedTurnStartIntentSequence !== undefined
+          ? { expectedTurnStartIntentSequence: input.expectedTurnStartIntentSequence }
+          : {}),
         ...(input.supersededCompletedRootTurnId !== undefined
           ? {
               supersededCompletedRootTurnId: input.supersededCompletedRootTurnId,
@@ -3791,10 +3887,12 @@ const make = Effect.gen(function* () {
 
         if (
           capabilities.value.liveSteer !== "supported" ||
+          runtimeActiveSession.runtimeMode !== thread.runtimeMode ||
+          runtimeActiveSession.interactionMode === "auto" ||
+          runtimeActiveSession.interactionMode === "plan" ||
           (runtimeActiveSession.provider === "gemini" &&
-            (runtimeActiveSession.runtimeMode !== event.payload.runtimeMode ||
-              (runtimeActiveSession.interactionMode ?? "default") !==
-                event.payload.interactionMode ||
+            ((runtimeActiveSession.interactionMode ?? "default") !==
+              nativeChatInteractionMode(runtimeActiveSession.provider) ||
               runtimeActiveSession.model !== desiredModelSelection.model))
         ) {
           yield* appendProviderFailureActivity({
@@ -3869,7 +3967,6 @@ const make = Effect.gen(function* () {
               ...(event.payload.modelSelection !== undefined
                 ? { modelSelection: event.payload.modelSelection }
                 : {}),
-              interactionMode: event.payload.interactionMode,
               createdAt: observedAt,
               ...(project !== undefined ? { project } : {}),
             });
@@ -4067,7 +4164,6 @@ const make = Effect.gen(function* () {
         ...(event.payload.modelSelection !== undefined
           ? { modelSelection: event.payload.modelSelection }
           : {}),
-        interactionMode: event.payload.interactionMode,
         createdAt: event.payload.createdAt,
         thread,
         ...(project !== undefined ? { project } : {}),
@@ -5038,7 +5134,6 @@ const make = Effect.gen(function* () {
           messageText: message.text,
           attachments: normalizedAttachments,
           ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
-          interactionMode: thread.interactionMode,
           createdAt: observedAt,
           thread,
           ...(project !== undefined ? { project } : {}),
@@ -5139,7 +5234,6 @@ const make = Effect.gen(function* () {
           messageText: message.text,
           attachments: normalizedAttachments,
           ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
-          interactionMode: thread.interactionMode,
           createdAt: event.payload.createdAt,
           thread,
           ...(project !== undefined ? { project } : {}),
@@ -5316,11 +5410,17 @@ const make = Effect.gen(function* () {
     const capabilities = yield* providerService.getCapabilities(providerInstanceId);
     if (
       capabilities.liveSteer !== "supported" ||
+      activeSession.runtimeMode !== thread.runtimeMode ||
+      (runtimeActiveSession !== undefined &&
+        runtimeActiveSession.runtimeMode !== thread.runtimeMode) ||
+      runtimeActiveSession?.interactionMode === "auto" ||
+      runtimeActiveSession?.interactionMode === "plan" ||
       (activeSession.providerName === "gemini" &&
-        (runtimeActiveSession?.activeTurnId !== activeSession.activeTurnId ||
+        (runtimeActiveSession?.provider !== "gemini" ||
+          runtimeActiveSession.activeTurnId !== activeSession.activeTurnId ||
           runtimeActiveSession.providerInstanceId !== thread.modelSelection.instanceId ||
-          runtimeActiveSession.runtimeMode !== thread.runtimeMode ||
-          (runtimeActiveSession.interactionMode ?? "default") !== thread.interactionMode ||
+          (runtimeActiveSession.interactionMode ?? "default") !==
+            nativeChatInteractionMode(runtimeActiveSession.provider) ||
           runtimeActiveSession.model !== thread.modelSelection.model))
     ) {
       return yield* appendProviderFailureActivity({
@@ -5412,7 +5512,6 @@ const make = Effect.gen(function* () {
           messageText: message.text,
           attachments: normalizedAttachments,
           ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
-          interactionMode: thread.interactionMode,
           createdAt: observedAt,
           thread,
           ...(project !== undefined ? { project } : {}),
@@ -6390,6 +6489,7 @@ const make = Effect.gen(function* () {
       thread.archivedAt !== null ||
       thread.deletedAt !== null ||
       thread.session?.status !== "ready" ||
+      thread.session.runtimeMode !== thread.runtimeMode ||
       thread.session.activeTurnId !== null ||
       thread.session.updatedAt !== sessionUpdatedAt ||
       thread.session.providerName !== "codex" ||
@@ -6499,6 +6599,9 @@ const make = Effect.gen(function* () {
         thread.archivedAt === null &&
         thread.deletedAt === null &&
         thread.session?.status === "ready" &&
+        thread.session.runtimeMode === event.payload.runtimeMode &&
+        thread.runtimeMode === event.payload.runtimeMode &&
+        thread.interactionMode === event.payload.interactionMode &&
         thread.session.activeTurnId === null &&
         thread.session.updatedAt === recovery.sessionUpdatedAt &&
         thread.session.providerName === "codex" &&
@@ -7371,6 +7474,7 @@ const make = Effect.gen(function* () {
       thread.archivedAt !== null ||
       thread.deletedAt !== null ||
       thread.session?.status !== "stopped" ||
+      thread.session.runtimeMode !== thread.runtimeMode ||
       thread.session.updatedAt !== sessionUpdatedAt ||
       thread.latestTurn?.turnId !== turnId
     )
@@ -7553,7 +7657,6 @@ const make = Effect.gen(function* () {
         messageText: message.text,
         attachments: message.attachments ?? [],
         modelSelection: event.payload.modelSelection ?? thread.modelSelection,
-        interactionMode: event.payload.interactionMode,
         allowActiveTurnSteerFallback: false,
         rememberModelSelection: false,
         inputOrigin: "scheduled",
@@ -7680,7 +7783,14 @@ const make = Effect.gen(function* () {
       });
     if (!(yield* permitted())) return;
     const thread = yield* resolveThread(threadId);
-    if (thread === undefined || thread.archivedAt !== null || thread.deletedAt !== null) return;
+    if (
+      thread === undefined ||
+      thread.archivedAt !== null ||
+      thread.deletedAt !== null ||
+      thread.runtimeMode !== event.payload.runtimeMode ||
+      thread.interactionMode !== event.payload.interactionMode
+    )
+      return;
     const message = thread.messages.find((entry) => entry.id === event.payload.messageId);
     if (message?.role !== "user") return;
 
@@ -7709,7 +7819,6 @@ const make = Effect.gen(function* () {
         messageText: message.text,
         attachments: message.attachments ?? [],
         modelSelection: event.payload.modelSelection ?? thread.modelSelection,
-        interactionMode: event.payload.interactionMode,
         allowActiveTurnSteerFallback: false,
         createdAt: event.payload.createdAt,
         thread,

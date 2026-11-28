@@ -1,5 +1,6 @@
 import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@cafecode/contracts";
 import {
+  DEFAULT_RUNTIME_MODE,
   EventId,
   MessageId,
   OrchestrationCheckpointSummary,
@@ -15,6 +16,7 @@ import {
   OrchestrationSession,
   OrchestrationThread,
   TurnId,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -428,8 +430,8 @@ export function projectEvent(
             ...(payload.codexContextWindowOverride !== undefined
               ? { codexContextWindowOverride: payload.codexContextWindowOverride }
               : {}),
-            runtimeMode: payload.runtimeMode,
-            interactionMode: payload.interactionMode,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
             latestTurn: null,
@@ -670,7 +672,7 @@ export function projectEvent(
         Effect.map((payload) => ({
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
-            runtimeMode: payload.runtimeMode,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -686,7 +688,7 @@ export function projectEvent(
         Effect.map((payload) => ({
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
-            interactionMode: payload.interactionMode,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -716,8 +718,8 @@ export function projectEvent(
               ...(payload.codexContextWindowOverride !== undefined
                 ? { codexContextWindowOverride: payload.codexContextWindowOverride }
                 : {}),
-              runtimeMode: payload.runtimeMode,
-              interactionMode: payload.interactionMode,
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
               session:
                 payload.runtimeRecovery?.codexTransientFailure !== undefined
                   ? thread.session
@@ -737,7 +739,7 @@ export function projectEvent(
                       ...(thread.session?.codexAutoCompactTokenLimit !== undefined
                         ? { codexAutoCompactTokenLimit: thread.session.codexAutoCompactTokenLimit }
                         : {}),
-                      runtimeMode: payload.runtimeMode,
+                      runtimeMode: thread.session?.runtimeMode ?? payload.runtimeMode,
                       ...(thread.session?.subagentRuntimeId !== undefined
                         ? { subagentRuntimeId: thread.session.subagentRuntimeId }
                         : {}),

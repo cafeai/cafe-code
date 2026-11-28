@@ -10840,27 +10840,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         options?.resolveEnvironment ? yield* options.resolveEnvironment : options?.environment,
       ).pipe(Effect.provideService(Path.Path, path));
       if (existingContext) {
+        const upgradesChatAccess =
+          existingContext.session.runtimeMode !== "full-access" &&
+          input.runtimeMode === "full-access";
+        const requiresIdleRetirement =
+          input.requireIdleForSubagentLimitChange || upgradesChatAccess;
         yield* Effect.logWarning("claude.session.replacing", {
           threadId: input.threadId,
           existingSessionStatus: existingContext.session.status,
           reason: "startSession called with existing active session",
         });
         const stopExisting = Effect.suspend(() => {
-          if (
-            input.requireIdleForSubagentLimitChange &&
-            !reserveClaudeIdleRetirement(existingContext)
-          ) {
+          if (requiresIdleRetirement && !reserveClaudeIdleRetirement(existingContext)) {
             return Effect.fail(
               new ProviderAdapterRequestError({
                 provider: PROVIDER,
                 method: "session/reconfigure",
-                remoteErrorTag: "subagent-concurrency-active",
-                detail:
-                  "Subagent concurrency cannot change while provider work is active or uncertain.",
+                remoteErrorTag: input.requireIdleForSubagentLimitChange
+                  ? "subagent-concurrency-active"
+                  : "chat-access-upgrade-active",
+                detail: input.requireIdleForSubagentLimitChange
+                  ? "Subagent concurrency cannot change while provider work is active or uncertain."
+                  : "Chat access cannot change while provider work is active or uncertain.",
               }),
             );
           }
-          if (!input.requireIdleForSubagentLimitChange) {
+          if (!requiresIdleRetirement) {
             return stopSessionInternal(existingContext, { emitExitEvent: false });
           }
           // The SDK's close is synchronous. Reserve above and close before any
@@ -10875,7 +10880,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               return new ProviderAdapterRequestError({
                 provider: PROVIDER,
                 method: "session/reconfigure",
-                remoteErrorTag: "subagent-concurrency-retirement-uncertain",
+                remoteErrorTag: input.requireIdleForSubagentLimitChange
+                  ? "subagent-concurrency-retirement-uncertain"
+                  : "chat-access-upgrade-retirement-uncertain",
                 detail: "The existing provider runtime could not be conclusively retired.",
               });
             },
@@ -10889,7 +10896,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ),
           );
         });
-        yield* input.requireIdleForSubagentLimitChange
+        yield* requiresIdleRetirement
           ? stopExisting
           : stopExisting.pipe(
               // Replacement cleanup is best-effort: never block the new session on

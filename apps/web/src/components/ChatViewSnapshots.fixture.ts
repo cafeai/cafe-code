@@ -84,7 +84,7 @@ export function createChatViewSnapshots({
     readonly withContextWindow?: boolean;
   }): OrchestrationReadModel {
     const snapshot = options?.withAuthoredPlan
-      ? createSnapshotWithPlanFollowUpPrompt()
+      ? createSnapshotWithSavedPlan()
       : createSnapshotForTargetUser({
           targetMessageId: "msg-user-runtime-task-progress" as MessageId,
           targetText: "implement the runtime task checklist",
@@ -441,7 +441,7 @@ export function createChatViewSnapshots({
     };
   }
 
-  function createSnapshotWithPlanFollowUpPrompt(options?: {
+  function createSnapshotWithSavedPlan(options?: {
     modelSelection?: { instanceId: ProviderInstanceId; model: string };
     planMarkdown?: string;
   }): OrchestrationReadModel {
@@ -503,6 +503,6 @@ export function createChatViewSnapshots({
     createSnapshotWithCrossTurnActiveSubagent,
     createSnapshotWithSecondaryProject,
     createSnapshotWithPendingUserInput,
-    createSnapshotWithPlanFollowUpPrompt,
+    createSnapshotWithSavedPlan,
   };
 }

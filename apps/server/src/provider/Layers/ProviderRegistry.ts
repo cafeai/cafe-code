@@ -1294,6 +1294,7 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
       loginProviderDeviceCode: (input, listSessions) =>
         loginBoundProviderDeviceAccount({
           instanceId: input.instanceId,
+          ...(input.forceLogin ? { forceLogin: true } : {}),
           getInstance: () => instanceRegistry.getInstance(input.instanceId),
           listSessions,
         }),

@@ -24,7 +24,7 @@ const png = Buffer.from(
 );
 const time = "2026-10-11T00:00:00.000Z";
 
-it.each(["codex", "claudeAgent"] as const)(
+it.each(["codex", "claudeAgent", "gemini"] as const)(
   "persists immutable %s images for authenticated viewers and fork ownership",
   async (provider) => {
     const directory = await mkdtemp(join(tmpdir(), "cafe-chat-image-db-"));
@@ -65,6 +65,11 @@ it.each(["codex", "claudeAgent"] as const)(
         INSERT INTO projection_thread_messages (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
         VALUES (${id}, ${threadId}, ${role}, ${text}, ${streaming}, ${time}, ${time})`;
           yield* addMessage("chat", "a", `![Chart](<${imagePath}>)`);
+          yield* addMessage(
+            "chat",
+            "file-uri",
+            `![Chart](file://${imagePath.startsWith("/") ? "" : "/"}${imagePath.replaceAll("\\", "/").replaceAll(" ", "%20")})`,
+          );
           yield* addMessage("chat", "streaming", `![Chart](<${imagePath}>)`, 1);
           yield* addMessage("chat", "user", `![Chart](<${imagePath}>)`, 0, "user");
           yield* addMessage("grok", "grok-a", `![Chart](<${imagePath}>)`);
@@ -73,6 +78,15 @@ it.each(["codex", "claudeAgent"] as const)(
           expect(yield* images.manifest("chat", "a")).toMatchObject([
             { source, width: 1, height: 1 },
           ]);
+          yield* images.publish("chat", "file-uri");
+          expect(yield* images.manifest("chat", "file-uri")).toMatchObject([
+            {
+              source: imagePath.replaceAll("\\", "/").replaceAll(" ", "%20"),
+              width: 1,
+              height: 1,
+            },
+          ]);
+          yield* sql`DELETE FROM projection_thread_messages WHERE message_id = 'file-uri'`;
           for (const [thread, message] of [
             ["chat", "streaming"],
             ["chat", "user"],

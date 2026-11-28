@@ -3667,6 +3667,105 @@ describe("settings panels", () => {
     expect(subscribeProviderDeviceLogin.mock.calls[0]?.[0]).toEqual({ instanceId: expectedId });
   });
 
+  it("exposes Verify account for Gemini verification-required accounts and lets users switch accounts", async () => {
+    const base = createBaseServerConfig();
+    const targetId = ProviderInstanceId.make("gemini_2");
+    const verificationUrl =
+      "https://accounts.google.com/v3/signin/continue?plt=test-token&continue=https%3A%2F%2Fdevelopers.google.com%2Fgemini-code-assist%2Fauth%2Fauth_success_gemini";
+    const config = {
+      ...base,
+      providers: [
+        {
+          instanceId: targetId,
+          driver: ProviderDriverKind.make("gemini"),
+          displayName: "P",
+          enabled: true,
+          installed: true,
+          version: "1.5.16",
+          status: "warning" as const,
+          auth: { status: "unauthenticated" as const },
+          authActions: { login: true, deviceCodeLogin: true, verificationRequired: true },
+          message:
+            "Google requires additional verification for this account before Gemini can be used. Open verification in Settings, then refresh Gemini.",
+          checkedAt: "2026-05-04T10:00:00.000Z",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        },
+      ],
+      settings: {
+        ...base.settings,
+        providerInstances: {
+          ...base.settings.providerInstances,
+          [targetId]: {
+            driver: ProviderDriverKind.make("gemini"),
+            displayName: "P",
+            enabled: true,
+            nativeHomeMode: "private" as const,
+          },
+        },
+      },
+    };
+    installProviderAccountSettings(config);
+    const subscribeProviderDeviceLogin = vi.fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>(
+      (input, listener) => {
+        if (input.forceLogin) {
+          listener({
+            type: "oauth-code",
+            loginId: "switch-login-1",
+            authorizationUrl:
+              "https://accounts.google.com/o/oauth2/auth?client_id=test&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code",
+          });
+        } else {
+          listener({ type: "verification-required", verificationUrl });
+        }
+        return () => {};
+      },
+    );
+    const openExternal = vi.fn<LocalApi["shell"]["openExternal"]>(() => Promise.resolve());
+    window.nativeApi!.server.subscribeProviderDeviceLogin = subscribeProviderDeviceLogin;
+    window.nativeApi!.shell = {
+      openExternal,
+      openInEditor: vi.fn().mockResolvedValue(undefined),
+      openTerminal: vi.fn().mockResolvedValue(undefined),
+      openPath: vi.fn().mockResolvedValue(undefined),
+      revealPath: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ProviderSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Verification required", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Verify account", exact: true }).click();
+    await expect
+      .element(page.getByRole("heading", { name: "Verify P", exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText(verificationUrl, { exact: true })).toBeVisible();
+    expect(subscribeProviderDeviceLogin).toHaveBeenCalledTimes(1);
+    expect(subscribeProviderDeviceLogin.mock.calls[0]?.[0]).toEqual({ instanceId: targetId });
+
+    await page.getByRole("button", { name: "Open verification page", exact: true }).click();
+    expect(openExternal).toHaveBeenCalledExactlyOnceWith(verificationUrl);
+
+    await page
+      .getByRole("button", { name: "Sign in with a different account", exact: true })
+      .click();
+    expect(subscribeProviderDeviceLogin).toHaveBeenCalledTimes(2);
+    expect(subscribeProviderDeviceLogin.mock.calls[1]?.[0]).toEqual({
+      instanceId: targetId,
+      forceLogin: true,
+    });
+    await expect
+      .element(page.getByRole("heading", { name: "Sign in to P", exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Open Google sign-in", exact: true }))
+      .toBeVisible();
+  });
+
   it.each(["", "invalid id", "codex", "axiom"])(
     "shows the invalid account ID %j before leaving Identity",
     async (invalidId) => {

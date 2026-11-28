@@ -28,7 +28,6 @@ import type { Agent, ProviderListResponse } from "@opencode-ai/sdk/v2";
 const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_PRESENTATION = {
   displayName: "OpenCode",
-  showInteractionModeToggle: false,
 } as const;
 const MINIMUM_OPENCODE_VERSION = "1.14.19";
 

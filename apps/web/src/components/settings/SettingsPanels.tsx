@@ -1791,6 +1791,7 @@ export function ProviderSettingsPanel() {
     readonly environmentId: EnvironmentId | null;
     readonly instanceId: ProviderInstanceId;
     readonly displayName: string;
+    readonly verificationMode?: boolean;
     readonly api: LocalApi;
   } | null>(null);
   useEffect(() => {
@@ -2140,6 +2141,7 @@ export function ProviderSettingsPanel() {
       readonly driver: ProviderDriverKind;
       readonly instanceId: ProviderInstanceId;
       readonly displayName: string;
+      readonly verificationMode?: boolean;
     }) => {
       if (input.driver === "gemini") {
         setDeviceLogin({
@@ -2147,6 +2149,7 @@ export function ProviderSettingsPanel() {
           environmentId,
           instanceId: input.instanceId,
           displayName: input.displayName,
+          ...(input.verificationMode ? { verificationMode: true } : {}),
           api: ensureWorkspaceApi(environmentId),
         });
         return;
@@ -2609,6 +2612,9 @@ export function ProviderSettingsPanel() {
                         driver: row.driver,
                         instanceId: row.instanceId,
                         displayName: providerDisplayName,
+                        ...(liveProvider?.authActions?.verificationRequired
+                          ? { verificationMode: true }
+                          : {}),
                       })
                   : undefined
               }
@@ -2648,6 +2654,7 @@ export function ProviderSettingsPanel() {
             api={deviceLogin.api}
             instanceId={deviceLogin.instanceId}
             displayName={deviceLogin.displayName}
+            verificationMode={deviceLogin.verificationMode}
             onClose={() => setDeviceLogin(null)}
           />
         ) : deviceLogin.driver === "grok" ? (

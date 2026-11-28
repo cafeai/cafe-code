@@ -20,6 +20,29 @@ if (args.includes("--print")) {
   if (!args.includes("/usage") || output < 0 || args[output + 1] !== "json") {
     process.exit(1);
   }
+  const usageErrorMessage = process.env.CAFE_GEMINI_FIXTURE_USAGE_ERROR_MESSAGE;
+  if (usageErrorMessage !== undefined) {
+    process.stderr.write(`error: ${usageErrorMessage}\n`);
+    console.log(
+      JSON.stringify({
+        conversation_id: "",
+        status: "ERROR",
+        response: "",
+        error: usageErrorMessage,
+        duration_seconds: 0,
+        num_turns: 0,
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          thinking_tokens: 0,
+          cache_read_tokens: 0,
+          total_tokens: 0,
+        },
+        finished_reason: "error",
+      }),
+    );
+    process.exit(1);
+  }
   // A representative native structured slash-command reply. Never read a
   // real profile, run a model prompt or expose actual account metadata.
   console.log(
@@ -135,6 +158,7 @@ let permissionPromptId;
 let questionPromptId;
 let steeringRootId;
 let steeringFollowUpId;
+let steeringSecondFollowUpId;
 let steeringCompleted = false;
 let backgroundWorkflowPromptCount = 0;
 let clientAdvertisedFormElicitation = false;
@@ -275,7 +299,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (id === "fixture-steering-approval" && clientResult) {
     if (clientResult.outcome?.optionId !== "fixture-once") process.exit(1);
     steeringCompleted = true;
-    result(steeringFollowUpId, { stopReason: "end_turn", usage: continuedUsage });
+    result(steeringSecondFollowUpId ?? steeringFollowUpId, {
+      stopReason: "end_turn",
+      usage: continuedUsage,
+    });
     return;
   }
 
@@ -401,6 +428,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         // follow-up output. The second RPC keeps the foreground turn alive.
         result(steeringRootId, { stopReason: "cancelled", usage: initialUsage });
         text("Follow-up reached the agent.");
+        return;
+      }
+      if (
+        input === "Deliver a second follow-up" &&
+        steeringFollowUpId !== undefined &&
+        steeringSecondFollowUpId === undefined
+      ) {
+        steeringSecondFollowUpId = id;
+        result(steeringFollowUpId, { stopReason: "cancelled", usage: initialUsage });
+        text("Second follow-up reached the agent.");
         requestPermission("fixture-steering-approval");
         return;
       }

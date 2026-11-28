@@ -58,7 +58,6 @@ const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnErro
 
 const CODEX_PRESENTATION = {
   displayName: "Codex",
-  showInteractionModeToggle: true,
 } as const;
 
 const MAX_PROVIDER_EMAIL_LENGTH = 320;

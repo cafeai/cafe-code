@@ -729,7 +729,6 @@ describe("composerDraftStore environment cleanup", () => {
       modelSelectionByProvider: {},
       activeProvider: null,
       runtimeMode: null,
-      interactionMode: null,
     };
 
     useComposerDraftStore.setState({
@@ -888,11 +887,10 @@ describe("composerDraftStore project draft thread mapping", () => {
     ).toEqual([]);
   });
 
-  it("round-trips standalone catalog identities, unsent content, account and access choices", () => {
+  it("round-trips standalone catalog identities, unsent content, and account selection under the current policy", () => {
     const store = useComposerDraftStore.getState();
     store.createStandaloneDraftSession(draftId, TEST_ENVIRONMENT_ID, threadId);
     store.createStandaloneDraftSession(otherDraftId, TEST_ENVIRONMENT_ID, otherThreadId);
-    store.setDraftThreadContext(draftId, { runtimeMode: "approval-required" });
     store.setPrompt(draftId, "kept across reload");
     store.setModelSelection(
       draftId,
@@ -902,6 +900,8 @@ describe("composerDraftStore project draft thread mapping", () => {
     const persisted = JSON.parse(
       JSON.stringify(persistence.partialize!(useComposerDraftStore.getState())),
     );
+    persisted.draftThreadsByThreadKey[draftId].runtimeMode = "approval-required";
+    persisted.draftThreadsByThreadKey[draftId].interactionMode = "plan";
     resetComposerDraftStore();
     useComposerDraftStore.setState(persistence.merge!(persisted, useComposerDraftStore.getState()));
     expect(
@@ -911,7 +911,8 @@ describe("composerDraftStore project draft thread mapping", () => {
       environmentId: TEST_ENVIRONMENT_ID,
       projectId: null,
       logicalProjectKey: null,
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
+      interactionMode: "default",
     });
     expect(store.getComposerDraft(draftId)).toMatchObject({
       prompt: "kept across reload",
@@ -2161,42 +2162,6 @@ describe("composerDraftStore provider-scoped option updates", () => {
       ).options,
     );
     expect(draft?.activeProvider).toBe("codex");
-  });
-});
-
-describe("composerDraftStore runtime and interaction settings", () => {
-  const threadId = ThreadId.make("thread-settings");
-  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
-
-  beforeEach(() => {
-    resetComposerDraftStore();
-  });
-
-  it("stores runtime mode overrides in the composer draft", () => {
-    const store = useComposerDraftStore.getState();
-
-    store.setRuntimeMode(threadRef, "approval-required");
-
-    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.runtimeMode).toBe("approval-required");
-  });
-
-  it("stores interaction mode overrides in the composer draft", () => {
-    const store = useComposerDraftStore.getState();
-
-    store.setInteractionMode(threadRef, "plan");
-
-    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.interactionMode).toBe("plan");
-  });
-
-  it("removes empty settings-only drafts when overrides are cleared", () => {
-    const store = useComposerDraftStore.getState();
-
-    store.setRuntimeMode(threadRef, "approval-required");
-    store.setInteractionMode(threadRef, "plan");
-    store.setRuntimeMode(threadRef, null);
-    store.setInteractionMode(threadRef, null);
-
-    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });
 });
 

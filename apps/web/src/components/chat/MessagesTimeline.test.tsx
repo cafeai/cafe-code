@@ -225,7 +225,7 @@ describe("MessagesTimeline file open helpers", () => {
     expect(markup).toContain('data-turn-configuration-settings="true"');
     // One escaped line: model, effort, Fast, exact account label and modes.
     expect(markup).toContain(
-      "GPT-6.1 Sol · Ultra · Fast on · Original account &lt;label&gt; · Build · Full access",
+      "GPT-6.1 Sol · Ultra · Fast on · Original account &lt;label&gt; · Full access",
     );
     expect(markup).not.toContain("codex_personal");
     expect(markup).not.toContain("Original account <label>");

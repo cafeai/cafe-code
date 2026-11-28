@@ -44,7 +44,6 @@ import {
 const PROVIDER = ProviderDriverKind.make("grok");
 const GROK_PRESENTATION = {
   displayName: "Grok Build",
-  showInteractionModeToggle: true,
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({ optionDescriptors: [] });
 const MINIMUM_GROK_VERSION = "1.0.4";
@@ -582,7 +581,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       ...(settings.allowUnsandboxedProbe === true
         ? {
             message:
-              "Grok is ready for Full access without a sandbox. Protected access modes and Plan still require a working sandbox.",
+              "Grok is ready for Full access without a sandbox. Text generation helpers still require a working sandbox.",
           }
         : {}),
       ...(discovered.accountRateLimits ? { accountRateLimits: discovered.accountRateLimits } : {}),

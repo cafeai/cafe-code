@@ -29,7 +29,7 @@ import { http, HttpResponse, ws } from "msw";
 import { setupWorker } from "msw/browser";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import { type Locator, locators, page, userEvent } from "vitest/browser";
+import { type Locator, locators, page } from "vitest/browser";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
 import { BrowserWsRpcHarness, type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
 import { useCommandPaletteStore } from "../commandPaletteStore";
@@ -162,7 +162,7 @@ function createBaseServerConfig(): ServerConfig {
       label: "Local environment",
       platform: { os: "darwin" as const, arch: "arm64" as const },
       serverVersion: "0.0.0-test",
-      capabilities: { repositoryIdentity: true, standaloneChats: true },
+      capabilities: { repositoryIdentity: true, standaloneChats: true, fullAccessChats: true },
     },
     auth: {
       policy: "loopback-browser",
@@ -367,7 +367,7 @@ function buildFixture(snapshot: OrchestrationReadModel): TestFixture {
         label: "Local environment",
         platform: { os: "darwin" as const, arch: "arm64" as const },
         serverVersion: "0.0.0-test",
-        capabilities: { repositoryIdentity: true, standaloneChats: true },
+        capabilities: { repositoryIdentity: true, standaloneChats: true, fullAccessChats: true },
       },
       cwd: "/repo/project",
       projectName: "Project",
@@ -1228,16 +1228,6 @@ async function waitForButtonContainingText(text: string): Promise<HTMLButtonElem
   );
 }
 
-async function waitForMenuRadioItemContainingText(text: string): Promise<HTMLElement> {
-  return waitForElement(
-    () =>
-      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]')).find(
-        (item) => item.textContent?.includes(text),
-      ) ?? null,
-    `Unable to find menu radio item containing "${text}".`,
-  );
-}
-
 async function expectComposerActionsContained(): Promise<void> {
   const footer = await waitForElement(
     () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
@@ -1265,23 +1255,6 @@ async function expectComposerActionsContained(): Promise<void> {
     },
     { timeout: 8_000, interval: 16 },
   );
-}
-
-async function expectComposerInteractionMode(expectedLabel: "Build" | "Plan"): Promise<void> {
-  await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-  await expect
-    .element(page.getByRole("menuitemradio", { name: expectedLabel, exact: true }))
-    .toHaveAttribute("aria-checked", "true");
-  await expect
-    .element(
-      page.getByRole("menuitemradio", {
-        name: expectedLabel === "Build" ? "Plan" : "Build",
-        exact: true,
-      }),
-    )
-    .toHaveAttribute("aria-checked", "false");
-  await userEvent.keyboard("{Escape}");
-  await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
 }
 
 async function waitForServerConfigToApply(): Promise<void> {
@@ -1663,7 +1636,7 @@ const {
   createSnapshotWithCrossTurnActiveSubagent,
   createSnapshotWithSecondaryProject,
   createSnapshotWithPendingUserInput,
-  createSnapshotWithPlanFollowUpPrompt,
+  createSnapshotWithSavedPlan,
 } = createChatViewSnapshots({
   createSnapshotForTargetUser,
   THREAD_ID,
@@ -1885,13 +1858,11 @@ export {
   expectEmptyScheduledSessionRailTasks,
   findButtonByText,
   waitForButtonByText,
-  waitForMenuRadioItemContainingText,
-  expectComposerInteractionMode,
   waitForServerConfigToApply,
   createDesktopBridgeForChatViewTests,
   createSnapshotWithRuntimeTaskProgress,
   createSnapshotWithCrossTurnActiveSubagent,
-  createSnapshotWithPlanFollowUpPrompt,
+  createSnapshotWithSavedPlan,
   UUID_ROUTE_RE,
   encodeServerConfig,
   toShellThread,

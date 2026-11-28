@@ -110,7 +110,7 @@ describe("accepted turn configuration presentation", () => {
     expect(presentTurnConfiguration(snapshot!)).toEqual({
       settings: "GPT-6.1 Sol · Effort: Ultra · Fast on",
       account: "Account: Codex Personal",
-      modes: "Build · Full access",
+      modes: "Full access",
       source: "Submitted settings",
       sourceDescription:
         "Settings Cafe submitted for this accepted turn. Provider defaults may be inherited; this is not independent execution or billing confirmation.",
@@ -257,7 +257,7 @@ describe("accepted turn configuration presentation", () => {
 describe("one-line work-log turn configuration summary", () => {
   it("keeps model, effort, Fast, the exact account label and both modes on one line", () => {
     expect(presentTurnConfigurationSummary(configuration)).toEqual({
-      summary: "GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Full access",
+      summary: "GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Full access",
       detail:
         "Submitted settings. Settings Cafe submitted for this accepted turn. Provider defaults may be inherited; this is not independent execution or billing confirmation.",
     });
@@ -275,7 +275,7 @@ describe("one-line work-log turn configuration summary", () => {
       resolvedServiceTier: tier,
     });
     expect(presentation.summary).toBe(
-      `GPT-6.1 Sol · Ultra · ${fast} · Codex Personal · Build · Full access`,
+      `GPT-6.1 Sol · Ultra · ${fast} · Codex Personal · Full access`,
     );
     expect(presentation.summary).not.toContain("Service tier");
     expect(presentation.detail).toContain(`Service tier: ${name}.`);
@@ -301,10 +301,10 @@ describe("one-line work-log turn configuration summary", () => {
     expect(
       presentTurnConfigurationSummary({ ...configuration, runtimeMode: "approval-required" })
         .summary,
-    ).toBe("GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Supervised");
+    ).toBe("GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Supervised");
     expect(
       presentTurnConfiguration({ ...configuration, runtimeMode: "approval-required" }).modes,
-    ).toBe("Build · Supervised");
+    ).toBe("Supervised");
   });
 
   it.each([
@@ -365,7 +365,7 @@ describe("one-line work-log turn configuration summary", () => {
       settingsSource: "session",
     });
     expect(presentation.summary).toBe(
-      "Local OpenCode model · balanced · Codex Personal · Build · Full access",
+      "Local OpenCode model · balanced · Codex Personal · Full access",
     );
     expect(presentation.detail.startsWith("Existing session settings.")).toBe(true);
   });

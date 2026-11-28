@@ -23,8 +23,7 @@ An OpenAI update can require a new qualification before its interface is admitte
 
 1. Install a compatible OpenAI desktop app and its Computer Use component using
    that application's normal setup.
-2. In a macOS Cafe chat with Codex, Claude Agent or Grok, select Full access (the
-   provider's corresponding Bypass mode) and enable **Computer use** in the
+2. In a macOS Cafe chat with Codex, Claude Agent or Grok, enable **Computer use** in the
    composer. New chats start off. Existing preferences and per-app grants remain
    in Cafe's permission store.
 3. OpenAI's native component owns Accessibility and Screen Recording setup and

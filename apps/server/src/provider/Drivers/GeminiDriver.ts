@@ -185,6 +185,9 @@ function discoverGeminiModels(input: GeminiProbeOptions) {
   });
 }
 
+const VERIFICATION_REQUIRED_MESSAGE =
+  "Google requires additional verification for this account before Gemini can be used. Open verification in Settings, then refresh Gemini.";
+
 export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
   driverKind: DRIVER,
   metadata: { displayName: DISPLAY_NAME },
@@ -192,6 +195,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
   defaultConfig: () => decodeSettings({}),
   create: (input) =>
     Effect.gen(function* () {
+      const ownerScope = yield* Effect.scope;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fs = yield* FileSystem.FileSystem;
       const settings = { ...input.config, enabled: input.enabled };
@@ -224,15 +228,26 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
           fs,
         });
         const currentSource = yield* geminiQuotaSource(fs, cli);
-        if (source !== currentSource || report === null) {
+        if (source !== currentSource) {
           lastQuota = null;
-          return null;
+          return { kind: "empty" } as const;
         }
-        if (report) {
-          lastQuota = source === null ? null : { source, report };
+        if (report.kind === "verification-required") {
+          lastQuota = null;
           return report;
         }
-        return historicalQuota(source);
+        if (report.kind === "empty") {
+          lastQuota = null;
+          return report;
+        }
+        if (report.kind === "reported") {
+          lastQuota = source === null ? null : { source, report: report.rateLimits };
+          return report;
+        }
+        const historical = historicalQuota(source);
+        return historical
+          ? ({ kind: "reported", rateLimits: historical } as const)
+          : ({ kind: "unavailable" } as const);
       });
       const instanceIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER,
@@ -251,7 +266,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         models: ServerProvider["models"] = [],
       ): ServerProvider => ({
         ...buildServerProvider({
-          presentation: { displayName: DISPLAY_NAME, showInteractionModeToggle: false },
+          presentation: { displayName: DISPLAY_NAME },
           enabled: input.enabled,
           checkedAt,
           models,
@@ -272,13 +287,26 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         message: "Checking the configured Antigravity CLI.",
       } satisfies ProviderProbeResult;
       let lastVerificationUrl: string | null = null;
+      let scheduleVerificationStatusRefresh: (() => Effect.Effect<void>) | undefined;
       const checkProvider = Effect.gen(function* () {
         lastVerificationUrl = null;
         const checkedAt = DateTime.formatIso(yield* DateTime.now);
         if (!input.enabled) return snapshotFor(checkedAt, pending);
         const { result, qualifiedCli, verificationUrl } = yield* discoverGeminiModels(probeOptions);
         if (result._tag === "Success") {
-          const accountRateLimits = yield* readQuota(result.success.cli);
+          const quota = yield* readQuota(result.success.cli);
+          if (quota.kind === "verification-required") {
+            lastVerificationUrl = quota.verificationUrl;
+            return snapshotFor(checkedAt, {
+              installed: true,
+              version: result.success.cli.version,
+              status: "warning",
+              auth: { status: "unauthenticated" },
+              authActions: { login: true, deviceCodeLogin: true, verificationRequired: true },
+              message: VERIFICATION_REQUIRED_MESSAGE,
+            });
+          }
+          const accountRateLimits = quota.kind === "reported" ? quota.rateLimits : null;
           return snapshotFor(
             checkedAt,
             {
@@ -313,13 +341,21 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
           version: null,
           status: unauthenticated ? "warning" : "error",
           auth: { status: unauthenticated ? "unauthenticated" : "unknown" },
-          ...(canLogIn ? { authActions: { login: true, deviceCodeLogin: true } } : {}),
+          ...(canLogIn
+            ? {
+                authActions: {
+                  login: true,
+                  deviceCodeLogin: true,
+                  ...(verificationUrl !== null ? { verificationRequired: true } : {}),
+                },
+              }
+            : {}),
           ...(accountRateLimits ? { accountRateLimits } : {}),
           message:
             error._tag === "GeminiCliQualificationError"
               ? error.message
               : verificationUrl !== null
-                ? "Google requires additional verification for this account before Gemini can be used. Sign in again to open the verification link, then refresh Gemini."
+                ? VERIFICATION_REQUIRED_MESSAGE
                 : unauthenticated
                   ? input.nativeHome
                     ? "Sign in to this Gemini account from Settings, then refresh Gemini."
@@ -332,7 +368,15 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         // this exact configuration without reopening an ACP catalog session.
         const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "cafecode-gemini-usage-version-" });
         const cli = yield* qualifyConfiguredGeminiCli(probeOptions, cwd);
-        return yield* readQuota(cli);
+        const quota = yield* readQuota(cli);
+        if (quota.kind === "verification-required") {
+          lastVerificationUrl = quota.verificationUrl;
+          if (scheduleVerificationStatusRefresh) {
+            yield* scheduleVerificationStatusRefresh();
+          }
+          return null;
+        }
+        return quota.kind === "reported" ? quota.rateLimits : null;
       }).pipe(
         Effect.scoped,
         Effect.catch(() =>
@@ -384,12 +428,15 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
             }),
         ),
       );
+      scheduleVerificationStatusRefresh = () =>
+        snapshot.refresh.pipe(Effect.ignore, Effect.forkIn(ownerScope), Effect.asVoid);
       const geminiLogin = yield* makeGeminiLogin({
         qualifyCli: (cwd) => qualifyConfiguredGeminiCli(probeOptions, cwd),
         environment,
         spawner,
         fs,
         hasSessions: adapter.listSessions().pipe(Effect.map((sessions) => sessions.length > 0)),
+        hasVerificationRequired: () => lastVerificationUrl !== null,
         refresh: (snapshot.refreshAfterAccountChange ?? snapshot.refresh).pipe(
           Effect.map((refreshed) => ({
             authenticated: refreshed.auth.status === "authenticated",

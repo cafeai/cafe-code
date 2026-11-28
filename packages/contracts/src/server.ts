@@ -85,6 +85,7 @@ export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 export const ServerProviderAuthActions = Schema.Struct({
   login: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   deviceCodeLogin: Schema.optionalKey(Schema.Boolean),
+  verificationRequired: Schema.optionalKey(Schema.Boolean),
 });
 export type ServerProviderAuthActions = typeof ServerProviderAuthActions.Type;
 
@@ -1120,6 +1121,7 @@ export type ServerProviderUpdateInput = typeof ServerProviderUpdateInput.Type;
 
 export const ServerProviderLoginInput = Schema.Struct({
   instanceId: ProviderInstanceId,
+  forceLogin: Schema.optionalKey(Schema.Boolean),
 });
 export type ServerProviderLoginInput = typeof ServerProviderLoginInput.Type;
 

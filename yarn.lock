@@ -824,7 +824,7 @@ __metadata:
     "@effect/language-service": "catalog:"
     "@fontsource-variable/dm-sans": "npm:5.3.0"
     "@fontsource/noto-color-emoji": "npm:5.3.2"
-    "@formkit/auto-animate": "npm:^0.10.0"
+    "@formkit/auto-animate": "patch:@formkit/auto-animate@npm%3A0.10.0#~/.yarn/patches/@formkit-auto-animate-npm-0.10.0-e9d2e597ce.patch"
     "@legendapp/list": "patch:@legendapp/list@npm%3A3.0.0-beta.44#~/.yarn/patches/@legendapp-list-npm-3.0.0-beta.44-3d8b008deb.patch"
     "@lexical/react": "npm:^0.41.0"
     "@noble/hashes": "npm:2.4.0"
@@ -1378,10 +1378,17 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@formkit/auto-animate@npm:^0.10.0":
+"@formkit/auto-animate@npm:0.10.0":
   version: 0.10.0
   resolution: "@formkit/auto-animate@npm:0.10.0"
   checksum: 10c0/2d73e0bd1ef735d15e4aa3b67d70f44913709254b28beb4c132ba09714353781510bea2ebcc8e603596b02fce687ac1654320627c7f41b99c91b98cce5ef45b4
+  languageName: node
+  linkType: hard
+
+"@formkit/auto-animate@patch:@formkit/auto-animate@npm%3A0.10.0#~/.yarn/patches/@formkit-auto-animate-npm-0.10.0-e9d2e597ce.patch":
+  version: 0.10.0
+  resolution: "@formkit/auto-animate@patch:@formkit/auto-animate@npm%3A0.10.0#~/.yarn/patches/@formkit-auto-animate-npm-0.10.0-e9d2e597ce.patch::version=0.10.0&hash=bec9ae"
+  checksum: 10c0/e8f9044c7a4568ebe5120f33e0fa06d31e159878d41946ec4fbed06910df228034c8bd4e7200db659c6e7e0743efcc536efd68150137eead95e650d0ef399be2
   languageName: node
   linkType: hard
 

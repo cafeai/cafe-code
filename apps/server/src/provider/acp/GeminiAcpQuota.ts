@@ -8,13 +8,13 @@ import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
 import { ChildProcess, type ChildProcessSpawner } from "effect/unstable/process";
 // Native command boundary: the CLI requires a host filesystem path.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 
 import { collectUint8StreamText } from "../../stream/collectUint8StreamText.ts";
+import { geminiVerificationUrl } from "../geminiLogin.ts";
 import { terminateProbeChild } from "../providerSnapshot.ts";
 import { geminiCliEnvironment, geminiPrivateHomeArgs } from "./GeminiAcpRuntime.ts";
 
@@ -41,6 +41,25 @@ const decodeUsageReport = Schema.decodeUnknownOption(
     }),
   ),
 );
+
+// Zero-turn eligibility/verification failure emitted by `agy --print /usage
+// --output-format json` when Google requires additional account verification.
+const decodeUsageErrorReport = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      status: Schema.Literal("ERROR"),
+      conversation_id: Schema.Literal(""),
+      num_turns: Schema.Literal(0),
+      error: Schema.String,
+    }),
+  ),
+);
+
+export type GeminiAccountQuotaProbeResult =
+  | { readonly kind: "reported"; readonly rateLimits: ServerProviderAccountRateLimits }
+  | { readonly kind: "empty" }
+  | { readonly kind: "verification-required"; readonly verificationUrl: string }
+  | { readonly kind: "unavailable" };
 
 interface QuotaBucket {
   readonly id: string;
@@ -137,13 +156,22 @@ function readUsageOutput(
     : undefined;
 }
 
+function readVerificationUrlFromFailure(stdoutText: string, stderrText: string): string | null {
+  const errorReport = Option.getOrUndefined(decodeUsageErrorReport(stdoutText));
+  if (errorReport) {
+    const fromJson = geminiVerificationUrl(errorReport.error);
+    if (fromJson) return fromJson;
+  }
+  return geminiVerificationUrl(stderrText);
+}
+
 export function readGeminiAccountRateLimits(input: {
   readonly binaryPath: string;
   readonly nativeHome?: string | undefined;
   readonly environment: NodeJS.ProcessEnv;
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly fs: FileSystem.FileSystem;
-}): Effect.Effect<ServerProviderAccountRateLimits | null | undefined> {
+}): Effect.Effect<GeminiAccountQuotaProbeResult> {
   // Attempt headless /usage on any qualified CLI and rely on strict zero-turn
   // response validation. Older or changed runtimes degrade to unknown quota
   // without affecting ACP chats.
@@ -171,35 +199,48 @@ export function readGeminiAccountRateLimits(input: {
         },
       ),
     );
-    const { stdout, exitCode } = yield* Effect.all(
+    const { stdout, stderr, exitCode } = yield* Effect.all(
       {
         stdout: collectUint8StreamText({ stream: child.stdout, maxBytes: OUTPUT_LIMIT_BYTES }),
-        stderr: Stream.runDrain(child.stderr),
+        stderr: collectUint8StreamText({ stream: child.stderr, maxBytes: OUTPUT_LIMIT_BYTES }),
         exitCode: child.exitCode,
       },
       { concurrency: "unbounded" },
     ).pipe(Effect.ensuring(terminateProbeChild(child, "250 millis")));
-    if (Number(exitCode) !== 0 || stdout.truncated) return undefined;
-    return readUsageOutput(stdout.text, DateTime.formatIso(yield* DateTime.now));
+    if (Number(exitCode) !== 0) {
+      const verificationUrl = readVerificationUrlFromFailure(
+        stdout.truncated ? "" : stdout.text,
+        stderr.text,
+      );
+      if (verificationUrl) {
+        return { kind: "verification-required", verificationUrl } as const;
+      }
+      return { kind: "unavailable" } as const;
+    }
+    if (stdout.truncated) return { kind: "unavailable" } as const;
+    const rateLimits = readUsageOutput(stdout.text, DateTime.formatIso(yield* DateTime.now));
+    if (rateLimits === null) return { kind: "empty" } as const;
+    if (rateLimits) return { kind: "reported", rateLimits } as const;
+    const verificationUrl = readVerificationUrlFromFailure(stdout.text, stderr.text);
+    return verificationUrl
+      ? ({ kind: "verification-required", verificationUrl } as const)
+      : ({ kind: "unavailable" } as const);
   }).pipe(
     Effect.scoped,
     Effect.timeoutOption(USAGE_REPORT_TIMEOUT),
-    // Record only the outcome. The native report and process errors can contain
-    // account data and must stay outside diagnostic output.
+    // Record only the outcome. The native report, verification URL and process
+    // errors can contain account data and must stay outside diagnostic output.
     Effect.tap((result) =>
-      Effect.annotateCurrentSpan(
-        "outcome",
-        Option.isNone(result)
-          ? "timeout"
-          : result.value === null
-            ? "empty"
-            : result.value
-              ? "reported"
-              : "unavailable",
+      Effect.annotateCurrentSpan("outcome", Option.isNone(result) ? "timeout" : result.value.kind),
+    ),
+    Effect.map((result) =>
+      Option.isSome(result) ? result.value : ({ kind: "unavailable" } as const),
+    ),
+    Effect.catch(() =>
+      Effect.annotateCurrentSpan("outcome", "failed").pipe(
+        Effect.as({ kind: "unavailable" } as const),
       ),
     ),
-    Effect.map(Option.getOrUndefined),
-    Effect.catch(() => Effect.annotateCurrentSpan("outcome", "failed").pipe(Effect.as(undefined))),
     Effect.withSpan("gemini.readAccountQuota"),
   );
 }

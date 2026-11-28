@@ -31,16 +31,8 @@ function Harness(props: {
     <>
       <CompactComposerControlsMenu
         showPlanSidebar={false}
-        provider={provider}
-        interactionMode="default"
-        planSidebarLabel="Plan"
         planSidebarOpen={false}
-        runtimeMode="approval-required"
-        showInteractionModeToggle={false}
-        onToggleInteractionMode={() => {}}
-        onNativePermissionModeChange={() => {}}
         onTogglePlanSidebar={() => {}}
-        onRuntimeModeChange={() => {}}
         subagentConcurrencyControl={
           <MenuItem onClick={() => setOpen(true)}>Subagent limit…</MenuItem>
         }

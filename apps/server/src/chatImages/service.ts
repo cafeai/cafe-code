@@ -50,7 +50,7 @@ export const makeChatImages = Effect.gen(function* () {
       LEFT JOIN projection_projects AS projects ON projects.project_id = threads.project_id
       JOIN projection_thread_sessions AS sessions ON sessions.thread_id = threads.thread_id
       WHERE messages.thread_id = ${threadId} AND messages.message_id = ${messageId}
-        AND messages.role = 'assistant' AND messages.is_streaming = 0 AND sessions.provider_name IN ('codex', 'claudeAgent')
+        AND messages.role = 'assistant' AND messages.is_streaming = 0 AND sessions.provider_name IN ('codex', 'claudeAgent', 'gemini')
         AND threads.deleted_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${threadId})`;
           const row = rows[0];

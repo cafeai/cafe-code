@@ -71,12 +71,7 @@ Cafe never retries a background check with interactive permissions.
   under Axiom's desktop chat root, then binds its Agent to Cafe's admitted project
   directory before accepting a prompt. The process itself launches in the Cafe
   project. Native thread IDs and account ownership stay with Axiom.
-- Supervised access enables Agent with `approve_commands`; Full access enables
-  Agent with `full_access`. Plan interaction disables Agent: desktop mode has no
-  Observe/read-only local tool profile, so planning uses supplied context and
-  conversation history without local tools. Auto-accept edits retains command
-  approval. These are native tool policies,
-  not a claim of equivalent OS sandboxing on macOS, Windows and Linux.
+- Full access enables Agent with the native `full_access` tool policy.
 - Approval replies select the exact offered option identifier. Session approval
   selects only `allow_exact_session`, never a guessed prefix grant. Cancel uses
   ACP cancellation and clears pending approvals/questions.

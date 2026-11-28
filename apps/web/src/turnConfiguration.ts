@@ -6,17 +6,8 @@ import {
 } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import {
-  CLAUDE_PERMISSION_MODE_OPTIONS,
-  deriveClaudePermissionMode,
-  GROK_PERMISSION_MODE_OPTIONS,
-} from "./components/chat/claudePermissionMode";
-import {
-  deriveGeminiPermissionMode,
-  GEMINI_PERMISSION_MODE_OPTIONS,
-} from "./components/chat/geminiPermissionMode";
 
-/** Access names shared with the composer's access control. */
+/** Access names recorded by existing and historical turns. */
 const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
   get "approval-required"() {
     return uiText("Supervised");
@@ -29,10 +20,9 @@ const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
   },
 };
 
-const INTERACTION_MODE_LABELS: Readonly<Record<ProviderInteractionMode, string>> = {
-  get default() {
-    return uiText("Build");
-  },
+const LEGACY_INTERACTION_MODE_LABELS: Readonly<
+  Record<Exclude<ProviderInteractionMode, "default">, string>
+> = {
   get plan() {
     return uiText("Plan");
   },
@@ -44,32 +34,31 @@ const INTERACTION_MODE_LABELS: Readonly<Record<ProviderInteractionMode, string>>
   },
 };
 
-/**
- * Use the same native permission labels as the composer. Leave omitted
- * settings generic and preserve the label from earlier Gemini settings.
- */
+/** Describe the native mode recorded for this turn, including legacy modes. */
 function nativePermissionModeLabel(configuration: ProviderTurnConfiguration): string | null {
-  if (configuration.interactionMode === undefined) return null;
-  const state = {
-    interactionMode: configuration.interactionMode,
-    runtimeMode: configuration.runtimeMode,
-  };
-  if (configuration.provider === "gemini") {
-    if (state.runtimeMode === "full-access" && state.interactionMode === "default") {
-      return uiText("Antigravity CLI permissions");
-    }
-    const mode = deriveGeminiPermissionMode(state);
-    return GEMINI_PERMISSION_MODE_OPTIONS.find((option) => option.id === mode)?.label ?? null;
+  const { provider, interactionMode, runtimeMode } = configuration;
+  if (
+    interactionMode === undefined ||
+    (provider !== "claudeAgent" && provider !== "grok" && provider !== "gemini")
+  ) {
+    return null;
   }
-  const options =
-    configuration.provider === "claudeAgent"
-      ? CLAUDE_PERMISSION_MODE_OPTIONS
-      : configuration.provider === "grok"
-        ? GROK_PERMISSION_MODE_OPTIONS
-        : null;
-  if (options === null) return null;
-  const mode = deriveClaudePermissionMode(state);
-  return options.find((option) => option.id === mode)?.label ?? null;
+  if (interactionMode === "plan") return uiText("Plan");
+  if (interactionMode === "auto") return uiText("Auto");
+  if (provider === "gemini") {
+    if (interactionMode === "gemini-bypass") {
+      return runtimeMode === "full-access" ? uiText("Bypass permissions") : null;
+    }
+    if (runtimeMode === "full-access") return uiText("Antigravity CLI permissions");
+  }
+  switch (runtimeMode) {
+    case "approval-required":
+      return uiText("Ask permissions");
+    case "auto-accept-edits":
+      return uiText("Accept edits");
+    case "full-access":
+      return uiText("Bypass permissions");
+  }
 }
 
 const decodeTurnConfiguration = Schema.decodeUnknownOption(ProviderTurnConfiguration);
@@ -193,7 +182,7 @@ function daybreakLabel(configuration: ProviderTurnConfiguration): string | undef
 
 /**
  * One-line work-log summary of the frozen snapshot, e.g.
- * "GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Full access".
+ * "GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Full access".
  * It keeps the exact configured account label, model, effort, Fast and mode
  * settings visible; the settings source, exact service tier and the
  * not-billing-confirmation caveat move to `detail` (shown in a tooltip).
@@ -230,11 +219,15 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
   const interactionMode =
     configuration.interactionMode === undefined
       ? uiText("Default mode")
-      : INTERACTION_MODE_LABELS[configuration.interactionMode];
+      : configuration.interactionMode === "default"
+        ? null
+        : LEGACY_INTERACTION_MODE_LABELS[configuration.interactionMode];
   const nativeMode = nativePermissionModeLabel(configuration);
   const modes = nativeMode
     ? [nativeMode]
-    : [interactionMode, RUNTIME_MODE_LABELS[configuration.runtimeMode]];
+    : [interactionMode, RUNTIME_MODE_LABELS[configuration.runtimeMode]].filter(
+        (mode) => mode !== null,
+      );
   const tierName = routedTier === undefined ? null : knownServiceTierName(routedTier);
   return {
     summary: [
@@ -298,7 +291,9 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
   const interactionMode =
     configuration.interactionMode === undefined
       ? uiText("Mode: provider default")
-      : INTERACTION_MODE_LABELS[configuration.interactionMode];
+      : configuration.interactionMode === "default"
+        ? null
+        : LEGACY_INTERACTION_MODE_LABELS[configuration.interactionMode];
   return {
     settings: [
       model,
@@ -314,7 +309,9 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
     account: uiText("Account: {account}", { account: configuration.providerDisplayName }),
     modes:
       (configuration.provider === "gemini" ? nativePermissionModeLabel(configuration) : null) ??
-      uiText("{interactionMode} · {runtimeMode}", { interactionMode, runtimeMode }),
+      (interactionMode === null
+        ? runtimeMode
+        : uiText("{interactionMode} · {runtimeMode}", { interactionMode, runtimeMode })),
     source:
       configuration.settingsSource === "submitted"
         ? uiText("Submitted settings")

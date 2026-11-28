@@ -1,7 +1,7 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default" | "goal" | "compact";
+export type ComposerSlashCommand = "model" | "goal" | "compact";
 
 export type ComposerGoalCommand =
   | { readonly action: "show" | "edit" | "pause" | "resume" | "clear" }
@@ -231,18 +231,6 @@ export function parseComposerCompactionCommand(
   const match = /^\/compact(?:\s+([\s\S]*))?$/i.exec(text.trim());
   if (!match) return null;
   return match[1]?.trim() ? "invalid-arguments" : "compact";
-}
-
-export function parseStandaloneComposerSlashCommand(
-  text: string,
-): Exclude<ComposerSlashCommand, "model" | "goal" | "compact"> | null {
-  const match = /^\/(plan|default)\s*$/i.exec(text.trim());
-  if (!match) {
-    return null;
-  }
-  const command = match[1]?.toLowerCase();
-  if (command === "plan") return "plan";
-  return "default";
 }
 
 /**

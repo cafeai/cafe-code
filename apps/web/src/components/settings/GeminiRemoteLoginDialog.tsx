@@ -44,14 +44,17 @@ export function GeminiRemoteLoginDialog({
   api,
   instanceId,
   displayName,
+  verificationMode = false,
   onClose,
 }: {
   readonly api: LocalApi;
   readonly instanceId: ProviderInstanceId;
   readonly displayName: string;
+  readonly verificationMode?: boolean | undefined;
   readonly onClose: () => void;
 }) {
   const uiLocale = useUiLocale();
+  const [forceLogin, setForceLogin] = useState(false);
   const [event, setEvent] = useState<ServerProviderDeviceLoginEvent | null>(null);
   const [failure, setFailure] = useState<number | null>(null);
   const [code, setCode] = useState("");
@@ -144,7 +147,7 @@ export function GeminiRemoteLoginDialog({
     let cancel: (() => void) | undefined;
     try {
       cancel = api.server.subscribeProviderDeviceLogin(
-        { instanceId },
+        forceLogin ? { instanceId, forceLogin: true } : { instanceId },
         (next) => {
           if (!active || terminal) return;
           terminal = next.type === "authenticated" || next.type === "verification-required";
@@ -163,11 +166,25 @@ export function GeminiRemoteLoginDialog({
       active = false;
       cancel?.();
     };
-  }, [api, instanceId]);
+  }, [api, forceLogin, instanceId]);
 
   const oauthInstructions = event?.type === "oauth-code" ? event : null;
   const verificationRequired = event?.type === "verification-required" ? event : null;
   const authenticated = event?.type === "authenticated";
+  const showingVerification =
+    verificationRequired !== null ||
+    (verificationMode && !forceLogin && oauthInstructions === null);
+
+  const handleSwitchAccount = () => {
+    setEvent(null);
+    setFailure(null);
+    setCode("");
+    setCodeError(null);
+    setActionFailure(null);
+    setVerificationPendingMessage(false);
+    setCopied(false);
+    setForceLogin(true);
+  };
 
   const handleSubmitCode = (submitEvent: React.FormEvent<HTMLFormElement>) => {
     submitEvent.preventDefault();
@@ -235,15 +252,24 @@ export function GeminiRemoteLoginDialog({
       <DialogPopup>
         <DialogHeader>
           <DialogTitle>
-            {uiText("Sign in to {value0}", { value0: displayName }, undefined, uiLocale)}
+            {showingVerification
+              ? uiText("Verify {value0}", { value0: displayName }, undefined, uiLocale)
+              : uiText("Sign in to {value0}", { value0: displayName }, undefined, uiLocale)}
           </DialogTitle>
           <DialogDescription>
-            {uiText(
-              "Sign in to Gemini on this server using a browser on your device.",
-              undefined,
-              undefined,
-              uiLocale,
-            )}
+            {showingVerification
+              ? uiText(
+                  "Complete Google account verification in your browser to use Gemini.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "Sign in to Gemini on this server using a browser on your device.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
@@ -312,6 +338,9 @@ export function GeminiRemoteLoginDialog({
                   {checkingVerification
                     ? uiText("Checking sign-in status…", undefined, undefined, uiLocale)
                     : uiText("Check sign-in status", undefined, undefined, uiLocale)}
+                </Button>
+                <Button variant="ghost" onClick={handleSwitchAccount}>
+                  {uiText("Sign in with a different account", undefined, undefined, uiLocale)}
                 </Button>
               </div>
               {verificationPendingMessage && (
@@ -413,7 +442,9 @@ export function GeminiRemoteLoginDialog({
             </>
           ) : (
             <p role="status">
-              {uiText("Preparing Google sign-in link…", undefined, undefined, uiLocale)}
+              {showingVerification
+                ? uiText("Checking verification status…", undefined, undefined, uiLocale)
+                : uiText("Preparing Google sign-in link…", undefined, undefined, uiLocale)}
             </p>
           )}
           {actionFailure && (

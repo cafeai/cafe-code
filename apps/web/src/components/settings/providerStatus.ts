@@ -124,7 +124,9 @@ export function getProviderSummary(
   }
   if (provider.auth.status === "unauthenticated") {
     return {
-      headline: uiText("Not signed in"),
+      headline: provider.authActions?.verificationRequired
+        ? uiText("Verification required", undefined, undefined, locale)
+        : uiText("Not signed in", undefined, undefined, locale),
       detail: provider.message ?? null,
     };
   }

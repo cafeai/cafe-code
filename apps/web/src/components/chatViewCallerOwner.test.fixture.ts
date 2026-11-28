@@ -21,6 +21,7 @@ const labels = [
   "desk-review-restoration",
   "desk-context-rail",
   "composer-rail-docking",
+  "composer-single-workflow",
   "composer-opening-stop",
   "composer-stop-accepted",
   "composer-preparation-stop",

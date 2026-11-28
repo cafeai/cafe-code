@@ -20,11 +20,11 @@ The authenticated work log displays the frozen summary on every new accepted tur
 Example compact row (one line that wraps rather than truncates in narrow panes; the settings source, exact service tier and the not-billing-confirmation caveat are in its tooltip):
 
 ```text
-GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Full access
+GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Full access
 Opus 5.5 · Max · Fast on · Claude Work · Ask permissions
 ```
 
-Mode names match the composer: access is Supervised, Auto-accept edits or Full access, and interaction is Build or Plan. Claude and Grok turns whose snapshot records an interaction mode show their single native permission mode (Ask permissions, Accept edits, Plan, Auto or Bypass permissions) using the composer's own mapping; a snapshot without an interaction mode keeps the generic pair because its native mode is ambiguous.
+Work logs show the access and workflow recorded when each turn ran, including historical Supervised and Auto-accept edits settings. Claude and Grok turns with a recorded interaction mode show their native permission label. Older snapshots without that field show the generic access and workflow labels.
 
 ## Security, privacy and compatibility
 

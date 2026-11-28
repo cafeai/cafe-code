@@ -1,5 +1,6 @@
 import {
   CommandId,
+  MessageId,
   OrchestrationEvent,
   OrchestrationThread,
   ProjectId,
@@ -121,18 +122,77 @@ describe("standalone orchestration admission", () => {
   });
 
   it.each(["approval-required", "auto-accept-edits", "full-access"] as const)(
-    "honors the selected %s access mode for standalone creation",
+    "uses Full access for a standalone create carrying the legacy %s field",
     async (runtimeMode) => {
       const result = await apply({ ...create(), runtimeMode }, createEmptyReadModel(now));
-      expect(result.threads[0]?.runtimeMode).toBe(runtimeMode);
+      expect(result.threads[0]?.runtimeMode).toBe("full-access");
     },
   );
 
-  it("does not change an explicitly project-associated creation's permission mode", async () => {
-    expect(await decide(create(projectId))).toMatchObject({
-      payload: { projectId, runtimeMode: "full-access" },
+  it("normalizes legacy project chat settings to Full access", async () => {
+    expect(
+      await decide({
+        ...create(projectId),
+        runtimeMode: "auto-accept-edits",
+        interactionMode: "plan",
+      }),
+    ).toMatchObject({
+      payload: { projectId, runtimeMode: "full-access", interactionMode: "default" },
     });
   });
+
+  it.each(["plan", "auto"] as const)(
+    "rejects new %s workflow changes and turns from older clients",
+    async (interactionMode) => {
+      const readModel = model([thread({ runtimeMode: "full-access" })]);
+      const settings = {
+        threadId: sourceId,
+        interactionMode,
+        createdAt: now,
+      };
+      await expect(
+        decide(
+          { ...settings, type: "thread.interaction-mode.set", commandId: CommandId.make("mode") },
+          readModel,
+        ),
+      ).rejects.toThrow("This chat uses Full access without a selectable workflow.");
+      await expect(
+        decide(
+          {
+            ...settings,
+            type: "thread.turn.start",
+            commandId: CommandId.make("start"),
+            runtimeMode: "full-access",
+            message: {
+              messageId: MessageId.make("input"),
+              role: "user",
+              text: "Work",
+              attachments: [],
+            },
+          },
+          readModel,
+        ),
+      ).rejects.toThrow("This chat uses Full access without a selectable workflow.");
+    },
+  );
+
+  it.each(["approval-required", "auto-accept-edits"] as const)(
+    "rejects a legacy %s access change",
+    async (runtimeMode) => {
+      await expect(
+        decide(
+          {
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("legacy-access-change"),
+            threadId: sourceId,
+            runtimeMode,
+            createdAt: now,
+          },
+          model([thread({ runtimeMode: "full-access" })]),
+        ),
+      ).rejects.toThrow("Full access is the only chat access policy.");
+    },
+  );
 
   it.each([{ branch: "secret-branch" }, { worktreePath: "/other/project" }])(
     "rejects standalone creation carrying repository metadata %j",

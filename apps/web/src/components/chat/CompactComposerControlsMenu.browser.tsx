@@ -74,8 +74,6 @@ async function mountMenu(props?: {
           [instanceId]: createModelSelection(instanceId, model, props?.modelSelection?.options),
         },
         activeProvider: instanceId,
-        runtimeMode: null,
-        interactionMode: null,
       },
     },
     draftThreadsByThreadKey: {},
@@ -140,12 +138,7 @@ async function mountMenu(props?: {
   const screen = await render(
     <CompactComposerControlsMenu
       showPlanSidebar={false}
-      provider={provider}
-      interactionMode="default"
-      planSidebarLabel="Plan"
       planSidebarOpen={false}
-      runtimeMode="approval-required"
-      showInteractionModeToggle
       {...(props?.traitsTriggerLabel !== undefined
         ? { traitsTriggerLabel: props.traitsTriggerLabel }
         : {})}
@@ -160,10 +153,7 @@ async function mountMenu(props?: {
           onPromptChange={onPromptChange}
         />
       }
-      onToggleInteractionMode={vi.fn()}
-      onNativePermissionModeChange={vi.fn()}
       onTogglePlanSidebar={vi.fn()}
-      onRuntimeModeChange={vi.fn()}
     />,
     { container: host },
   );
@@ -191,7 +181,13 @@ describe("CompactComposerControlsMenu", () => {
   });
 
   it("keeps the selected reasoning visible on the closed compact trigger", async () => {
-    await using _ = await mountMenu({ traitsTriggerLabel: "Ultra" });
+    await using _ = await mountMenu({
+      modelSelection: createModelSelection(
+        ProviderInstanceId.make("claudeAgent"),
+        "claude-opus-4-6",
+      ),
+      traitsTriggerLabel: "Ultra",
+    });
 
     const trigger = document.querySelector<HTMLElement>('[aria-label="More composer controls"]');
     const label = document.querySelector<HTMLElement>(
@@ -202,9 +198,8 @@ describe("CompactComposerControlsMenu", () => {
     expect(label?.textContent).toBe("Ultra");
 
     await page.getByLabelText("More composer controls").click();
-    await vi.waitFor(() => {
-      expect(document.body.textContent ?? "").toContain("Mode");
-    });
+    const menu = page.getByRole("menu");
+    await expect.element(menu.getByText("Reasoning", { exact: true })).toBeVisible();
   });
 
   it("shows fast mode controls for Opus", async () => {
@@ -318,80 +313,6 @@ describe("CompactComposerControlsMenu", () => {
     });
   });
 
-  it("shows Claude's complete interactive permission-mode surface", async () => {
-    await using _ = await mountMenu();
-
-    await page.getByLabelText("More composer controls").click();
-
-    await vi.waitFor(() => {
-      const text = document.body.textContent ?? "";
-      expect(text).toContain("Ask permissions");
-      expect(text).toContain("Accept edits");
-      expect(text).toContain("Plan");
-      expect(text).toContain("Auto");
-      expect(text).toContain("Bypass permissions");
-      // Only the dangerous mode keeps its warning visible in the menu.
-      expect(text).toContain("Run without permission checks");
-      expect(text).not.toContain("Ask before edits and commands");
-      expect(text).not.toContain("Access");
-      expect(text).not.toContain("Supervised");
-    });
-    // Routine mode explanations stay available on hover/focus.
-    await page.getByRole("menuitemradio", { name: "Ask permissions" }).hover();
-    await expect
-      .element(page.getByRole("tooltip"))
-      .toHaveTextContent("Ask before edits and commands.");
-  });
-
-  it("keeps access selectable without traits or an interaction-mode section", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const onRuntimeModeChange = vi.fn();
-    const screen = await render(
-      <CompactComposerControlsMenu
-        showPlanSidebar={false}
-        provider={ProviderDriverKind.make("codex")}
-        interactionMode="default"
-        planSidebarLabel="Plan"
-        planSidebarOpen={false}
-        runtimeMode="approval-required"
-        showInteractionModeToggle={false}
-        onToggleInteractionMode={vi.fn()}
-        onNativePermissionModeChange={vi.fn()}
-        onTogglePlanSidebar={vi.fn()}
-        onRuntimeModeChange={onRuntimeModeChange}
-      />,
-      { container: host },
-    );
-
-    await page.getByLabelText("More composer controls").click();
-
-    await vi.waitFor(() => {
-      const text = document.body.textContent ?? "";
-      expect(text).not.toContain("Mode");
-      expect(text).not.toContain("Build");
-      expect(text).not.toContain("Plan");
-      expect(text).toContain("Access");
-      expect(text).toContain("Supervised");
-      expect(text).toContain("Auto-accept edits");
-      expect(text).toContain("Full access");
-    });
-    await page.getByRole("menuitemradio", { name: "Supervised" }).hover();
-    await expect
-      .element(page.getByRole("tooltip"))
-      .toHaveTextContent("Ask before commands and file changes.");
-
-    const autoAcceptItem = Array.from(
-      document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]'),
-    ).find((item) => item.textContent?.includes("Auto-accept edits"));
-    expect(autoAcceptItem).toBeDefined();
-    autoAcceptItem?.click();
-    expect(onRuntimeModeChange).toHaveBeenCalledExactlyOnceWith("auto-accept-edits");
-
-    await screen.unmount();
-    host.remove();
-  });
-
   it("shows a human-readable Codex goal status and opens the goal control", async () => {
     const host = document.createElement("div");
     document.body.append(host);
@@ -399,18 +320,10 @@ describe("CompactComposerControlsMenu", () => {
     const screen = await render(
       <CompactComposerControlsMenu
         showPlanSidebar={false}
-        provider={ProviderDriverKind.make("codex")}
-        interactionMode="default"
-        planSidebarLabel="Plan"
         planSidebarOpen={false}
-        runtimeMode="approval-required"
-        showInteractionModeToggle={false}
         showGoalControl
         goalStatus="usageLimited"
-        onToggleInteractionMode={vi.fn()}
-        onNativePermissionModeChange={vi.fn()}
         onTogglePlanSidebar={vi.fn()}
-        onRuntimeModeChange={vi.fn()}
         onOpenGoal={onOpenGoal}
       />,
       { container: host },

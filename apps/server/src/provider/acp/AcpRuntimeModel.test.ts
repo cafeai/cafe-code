@@ -505,4 +505,26 @@ describe("AcpRuntimeModel", () => {
       },
     });
   });
+
+  it("normalizes cancelled, canceled, and error ACP tool statuses to terminal failed", () => {
+    for (const status of ["cancelled", "canceled", "error"]) {
+      const parsed = parseSessionUpdateEvent({
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: `tool-${status}`,
+          status: status as unknown as EffectAcpSchema.ToolCallStatus,
+        },
+      } satisfies EffectAcpSchema.SessionNotification);
+
+      expect(parsed.events).toHaveLength(1);
+      expect(parsed.events[0]).toMatchObject({
+        _tag: "ToolCallUpdated",
+        toolCall: {
+          toolCallId: `tool-${status}`,
+          status: "failed",
+        },
+      });
+    }
+  });
 });

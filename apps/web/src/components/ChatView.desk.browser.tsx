@@ -17,6 +17,7 @@ import {
   waitForLayout,
   waitForElement,
   waitForComposerEditor,
+  waitForComposerMenuItem,
   mountChatView,
   createSnapshotWithRuntimeTaskProgress,
 } from "./ChatViewBrowser.shared";
@@ -27,7 +28,6 @@ import {
   type OrchestrationReadModel,
   ProviderDriverKind,
   ProviderInstanceId,
-  type RuntimeMode,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
@@ -808,38 +808,36 @@ describe("ChatView full app (desk)", () => {
     },
   );
 
-  it("keeps typing and control-only commands temporary until a message is sent", async () => {
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: withSecondThread(
-        createSnapshotForTargetUser({
-          targetMessageId: MessageId.make("preview-mode-only"),
-          targetText: "Preview mode fixture",
-        }),
-      ),
-    });
-    try {
-      await page.getByTestId(`thread-row-${THREAD_ID}`).dblClick();
-      await page.getByTestId(`thread-row-${secondId}`).click();
-      const tab = page.getByRole("tab", { name: "Second Desk chat", exact: true });
-      useComposerDraftStore.getState().setPrompt(secondRef, "/plan");
-      await expect.element(page.getByTestId("composer-editor")).toHaveTextContent("/plan");
-      await expect.element(tab).toHaveAttribute("data-preview", "true");
-      await page.getByRole("button", { name: "Send message", exact: true }).click();
-      await vi.waitFor(() =>
-        expect(useComposerDraftStore.getState().getComposerDraft(secondRef)?.interactionMode).toBe(
-          "plan",
+  it("keeps preview tabs temporary when opening the model picker with a command", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, { label: "desk-preview" });
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: withSecondThread(
+          createSnapshotForTargetUser({
+            targetMessageId: MessageId.make("preview-model-command"),
+            targetText: "Preview model fixture",
+          }),
         ),
-      );
-      await expect.element(tab).toHaveAttribute("data-preview", "true");
+      });
+      await owner.own("first-row", () => page.getByTestId(`thread-row-${THREAD_ID}`).dblClick());
+      await owner.own("second-row", () => page.getByTestId(`thread-row-${secondId}`).click());
+      const tab = page.getByRole("tab", { name: "Second Desk chat", exact: true });
+      await owner.own("tab", () => expect.element(tab).toHaveAttribute("data-preview", "true"));
+      await owner.own("prompt", () => page.getByTestId("composer-editor").fill("/mod"));
+      await owner.own("picker", async () => {
+        const command = await waitForComposerMenuItem("slash:model");
+        owner.assertActive();
+        await page.elementLocator(command).click();
+        await expect.element(page.getByPlaceholder("Search models...")).toBeVisible();
+      });
+      await owner.own("tab", () => expect.element(tab).toHaveAttribute("data-preview", "true"));
       expect(
         wsRequests.some(
           (body) => body.type === "thread.turn.start" || body.type === "thread.turn.steer",
         ),
       ).toBe(false);
-    } finally {
-      await mounted.cleanup();
-    }
+    });
   });
 
   it.each(["project", "standalone"] as const)(
@@ -919,7 +917,7 @@ describe("ChatView full app (desk)", () => {
     },
   );
 
-  const seedDeskQueue = async (runtimeMode: RuntimeMode = "full-access") => {
+  const seedDeskQueue = async () => {
     const queue = createFollowUpQueuePersistence();
     expect(
       (
@@ -935,7 +933,7 @@ describe("ChatView full app (desk)", () => {
             model: "gpt-5",
             promptEffort: null,
             modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
-            runtimeMode,
+            runtimeMode: "full-access",
             interactionMode: "default",
             queuedAt: isoAt(1000),
             blockedReason: null,
@@ -1491,14 +1489,16 @@ describe("ChatView full app (desk)", () => {
   });
 
   it("keeps queued input unclaimed when Stop arrives during deferred preparation", async () => {
-    const snapshot = withSecondThread(
-      createSnapshotForTargetUser({
-        targetMessageId: MessageId.make("desk-stop"),
-        targetText: "Desk Stop fixture",
-        runtimeMode: "full-access",
-      }),
-    );
-    const queue = await seedDeskQueue("approval-required");
+    const original = createSnapshotForTargetUser({
+      targetMessageId: MessageId.make("desk-stop"),
+      targetText: "Desk Stop fixture",
+      runtimeMode: "full-access",
+    });
+    const snapshot = withSecondThread({
+      ...original,
+      threads: original.threads.map((thread) => ({ ...thread, interactionMode: "plan" })),
+    });
+    const queue = await seedDeskQueue();
     let release!: (value: { sequence: number }) => void;
     const pending = new Promise<{ sequence: number }>((resolve) => {
       release = resolve;
@@ -1508,14 +1508,16 @@ describe("ChatView full app (desk)", () => {
       snapshot,
       resolveRpc: (body) =>
         body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-          ? body.type === "thread.runtime-mode.set"
+          ? body.type === "thread.interaction-mode.set"
             ? pending
             : { sequence: 2 }
           : undefined,
     });
     try {
       await vi.waitFor(() =>
-        expect(wsRequests.some((request) => request.type === "thread.runtime-mode.set")).toBe(true),
+        expect(wsRequests.some((request) => request.type === "thread.interaction-mode.set")).toBe(
+          true,
+        ),
       );
       // A provider projection can catch up during settings preparation.
       // Exercise the genuine Stop control once that active turn is visible,

@@ -1088,7 +1088,7 @@ describe("Cafe Code MCP server", () => {
       ...defaults,
       orchestrationEngine: {
         dispatch: (command) =>
-          command.type === "thread.runtime-mode.set"
+          command.type === "thread.metadata.update"
             ? Effect.die(new Error("PRIVATE_NATIVE_FAILURE"))
             : defaults.orchestrationEngine.dispatch(command),
       },
@@ -1113,7 +1113,7 @@ describe("Cafe Code MCP server", () => {
         const change = {
           threadId,
           title: "Changed metadata",
-          runtimeMode: "approval-required",
+          originClassification: "agent",
           requestId: partialId,
         };
         const partial = await client.callTool({ name: "update_thread", arguments: change });
@@ -1895,7 +1895,7 @@ describe("Cafe Code MCP server", () => {
   });
 
   it.for([undefined, "approval-required", "auto-accept-edits", "full-access"] as const)(
-    "creates and detaches standalone chats with no project lookup and access mode %s",
+    "creates full-access standalone chats and can detach them without a project lookup (%s)",
     async (runtimeMode, context) => {
       const dispatched: Array<
         Parameters<CafeMcpDependencies["orchestrationEngine"]["dispatch"]>[0]
@@ -1934,13 +1934,32 @@ describe("Cafe Code MCP server", () => {
       expect(dispatched[0]).toMatchObject({
         type: "thread.create",
         projectId: null,
-        runtimeMode: runtimeMode ?? "full-access",
+        runtimeMode: "full-access",
         branch: null,
         worktreePath: null,
       });
       expect(dispatched[1]).toMatchObject({ type: "thread.meta.update", projectId: null });
     },
   );
+
+  it("refuses retired chat workflows before creating or modifying a chat", async (context) => {
+    const dispatched: NonNullable<Parameters<typeof makeDependencies>[0]>["dispatched"] = [];
+    await withClient(context, makeDependencies({ dispatched }), async (client) => {
+      for (const interactionMode of ["plan", "auto"]) {
+        const created = await client.callTool({
+          name: "create_thread",
+          arguments: { title: "Worker", interactionMode },
+        });
+        const updated = await client.callTool({
+          name: "update_thread",
+          arguments: { threadId, title: "Changed title", interactionMode },
+        });
+        expect(created.isError).toBe(true);
+        expect(updated.isError).toBe(true);
+      }
+    });
+    expect(dispatched).toEqual([]);
+  });
 
   it("redacts provider secrets from tool results", async (context) => {
     const secretSettings: ServerSettings = {
@@ -2922,9 +2941,10 @@ describe("Cafe MCP thread groups and origin", () => {
       context,
       dependencies,
       async (client) => {
+        const args = { title: "Worker", runtimeMode: "approval-required", requestId };
         const pending = client.callTool({
           name: "create_thread",
-          arguments: { title: "Worker", requestId },
+          arguments: args,
         });
         // Reconcile while the original action is still in flight.
         await dispatchEntered;
@@ -2941,7 +2961,7 @@ describe("Cafe MCP thread groups and origin", () => {
         // … and the same requestId is refused rather than executed again.
         const repeat = await client.callTool({
           name: "create_thread",
-          arguments: { title: "Worker", requestId },
+          arguments: args,
         });
         expect(repeat.isError).toBe(true);
         release();
@@ -2949,7 +2969,17 @@ describe("Cafe MCP thread groups and origin", () => {
         // … yet the delayed original still creates exactly that thread.
         expect((original.structuredContent as { threadId: string }).threadId).toBe(planned);
         expect(createdIds.has(planned)).toBe(true);
-        expect(dispatched.filter((command) => command.type === "thread.create")).toHaveLength(1);
+        expect(await client.callTool({ name: "create_thread", arguments: args })).toMatchObject({
+          structuredContent: { threadId: planned },
+        });
+        const changed = await client.callTool({
+          name: "create_thread",
+          arguments: { ...args, runtimeMode: "auto-accept-edits" },
+        });
+        expect(changed.isError).toBe(true);
+        expect(dispatched.filter((command) => command.type === "thread.create")).toEqual([
+          expect.objectContaining({ threadId: planned, runtimeMode: "full-access" }),
+        ]);
       },
       { operations, operationOwner: owner },
     );

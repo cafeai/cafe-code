@@ -6,12 +6,10 @@ import {
   THREAD_TITLE,
   LOCAL_ENVIRONMENT_ID,
   SECOND_PROJECT_ID,
-  THREAD_KEY,
   UUID_ROUTE_RE,
   ADD_PROJECT_SUBMENU_PLACEHOLDER,
   wsRequests,
   DEFAULT_VIEWPORT,
-  WIDE_FOOTER_VIEWPORT,
   createSnapshotForTargetUser,
   threadRefFor,
   composerDraftFor,
@@ -21,14 +19,12 @@ import {
   materializePromotedDraftThreadViaDomainEvent,
   startPromotedServerThreadViaDomainEvent,
   promoteDraftThreadViaDomainEvent,
-  createDraftOnlySnapshot,
   createProjectlessSnapshot,
-  setDraftThreadWithoutWorktree,
   waitForLayout,
   waitForElement,
   waitForURL,
   waitForComposerEditor,
-  waitForMenuRadioItemContainingText,
+  waitForSendButton,
   waitForServerConfigToApply,
   dispatchChatNewShortcut,
   triggerChatNewShortcutUntilPath,
@@ -143,60 +139,6 @@ describe("ChatView full app (navigation)", () => {
         }),
       );
     });
-  });
-
-  it("keeps runtime access in the desktop options menu without a footer mode label", async () => {
-    setDraftThreadWithoutWorktree();
-
-    const mounted = await mountChatView({
-      viewport: WIDE_FOOTER_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-    });
-
-    try {
-      const footer = await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
-        "Unable to find composer footer.",
-      );
-      const optionsButton = await waitForElement(
-        () =>
-          footer.querySelector<HTMLButtonElement>('button[aria-label="More composer controls"]'),
-        "Unable to find the combined composer options button.",
-      );
-      const footerShowsAccessMode = () =>
-        Array.from(footer.querySelectorAll("button")).some((button) =>
-          ["Supervised", "Auto-accept edits", "Full access"].includes(
-            button.textContent?.trim() ?? "",
-          ),
-        );
-
-      // The provider fixture intentionally has no option descriptors. Access
-      // still needs a fallback options trigger, but the selected access label
-      // must not consume permanent footer space.
-      expect(optionsButton.textContent?.trim()).toBe("");
-      expect(footerShowsAccessMode()).toBe(false);
-      optionsButton.click();
-
-      await waitForMenuRadioItemContainingText("Supervised");
-
-      const autoAcceptItem = await waitForMenuRadioItemContainingText("Auto-accept edits");
-      await waitForMenuRadioItemContainingText("Full access");
-
-      autoAcceptItem.click();
-      await vi.waitFor(() => {
-        expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.runtimeMode).toBe(
-          "auto-accept-edits",
-        );
-        expect(
-          Array.from(document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]')).find(
-            (item) => item.textContent?.includes("Auto-accept edits"),
-          ),
-        ).toHaveAttribute("aria-checked", "true");
-      });
-      expect(footerShowsAccessMode()).toBe(false);
-    } finally {
-      await mounted.cleanup();
-    }
   });
 
   it("hides the archive action when the pointer leaves a thread row", async () => {
@@ -896,7 +838,7 @@ describe("ChatView full app (navigation)", () => {
     }
   });
 
-  it("defaults new Gemini drafts and Full-access provider switches to Bypass permissions while keeping legacy threads in Ask permissions", async (context) => {
+  it("uses Full access for existing and new Gemini chats", async (context) => {
     const geminiInstanceId = ProviderInstanceId.make("gemini");
     const geminiDriver = ProviderDriverKind.make("gemini");
     const geminiModel = createModelSelection(geminiInstanceId, "gemini-4-neon", [
@@ -942,6 +884,8 @@ describe("ChatView full app (navigation)", () => {
       const mounted = await owner.mount({
         viewport: DEFAULT_VIEWPORT,
         snapshot: legacySnapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
         configureFixture: (nextFixture) => {
           nextFixture.serverConfig = {
             ...nextFixture.serverConfig,
@@ -973,17 +917,24 @@ describe("ChatView full app (navigation)", () => {
         },
       });
 
-      // Legacy persisted Gemini thread with default + full-access remains Ask permissions.
-      await owner.own("controls", () =>
-        page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+      await owner.own("config", () => waitForServerConfigToApply());
+      await owner.own("prompt", () =>
+        page.getByTestId("composer-editor").fill("Continue this chat"),
       );
-      const legacyAskItem = await waitForMenuRadioItemContainingText("Ask permissions");
-      expect(legacyAskItem.getAttribute("aria-checked")).toBe("true");
-      await owner.own("close", () =>
-        page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+      const send = await owner.own("send-target", () => waitForSendButton());
+      owner.assertActive();
+      send.click();
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            modelSelection: { instanceId: geminiInstanceId, model: geminiModel.model },
+          });
+        }),
       );
 
-      // Creating a brand-new draft when Gemini is sticky initializes Bypass permissions.
       const newThreadButton = page.getByTestId("new-thread-button");
       await expect.element(newThreadButton).toBeInTheDocument();
       await revealProjectThreadAction();
@@ -999,19 +950,11 @@ describe("ChatView full app (navigation)", () => {
       const newDraftId = draftIdFromPath(newThreadPath);
       expect(useComposerDraftStore.getState().getDraftSession(newDraftId)).toMatchObject({
         runtimeMode: "full-access",
-        interactionMode: "gemini-bypass",
+        interactionMode: "default",
       });
       expect(composerDraftFor(newDraftId)).toMatchObject({
         activeProvider: geminiInstanceId,
-        runtimeMode: "full-access",
-        interactionMode: "gemini-bypass",
       });
-
-      await owner.own("controls", () =>
-        page.getByRole("button", { name: "More composer controls", exact: true }).click(),
-      );
-      const bypassItem = await waitForMenuRadioItemContainingText("Bypass permissions");
-      expect(bypassItem.getAttribute("aria-checked")).toBe("true");
     });
   });
 

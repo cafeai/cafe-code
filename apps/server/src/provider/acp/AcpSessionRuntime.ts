@@ -114,6 +114,10 @@ export interface AcpSessionRuntimeOptions {
   /** Providers with a native completion fence keep the prompt RPC until cancellation settles. */
   readonly cancelPromptLocally?: boolean;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  /** Optional provider-specific `_meta` attached to `session/new`, `session/resume`, and `session/load`. */
+  readonly sessionMeta?: (
+    initializeResult: EffectAcpSchema.InitializeResponse,
+  ) => Record<string, unknown> | undefined;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
   readonly protocolLogging?: {
     readonly logIncoming?: boolean;
@@ -715,6 +719,7 @@ export const make = (
       const sessionCwd = options.resolveSessionCwd
         ? yield* options.resolveSessionCwd()
         : options.cwd;
+      const sessionMeta = options.sessionMeta?.(initializeResult);
 
       let sessionId: string;
       let sessionSetupResult:
@@ -728,6 +733,7 @@ export const make = (
           sessionId,
           cwd: sessionCwd,
           mcpServers: options.mcpServers ?? [],
+          ...(sessionMeta ? { _meta: sessionMeta } : {}),
         } satisfies EffectAcpSchema.ResumeSessionRequest;
         // Resume avoids history replay. When only load is supported, updates
         // received while the runtime is Starting are never projected as new
@@ -759,6 +765,7 @@ export const make = (
           sessionId,
           cwd: sessionCwd,
           mcpServers: options.mcpServers ?? [],
+          ...(sessionMeta ? { _meta: sessionMeta } : {}),
         } satisfies EffectAcpSchema.ResumeSessionRequest;
         sessionSetupResult = yield* runLoggedRequest(
           "session/resume",
@@ -770,6 +777,7 @@ export const make = (
           sessionId: options.resumeSessionId,
           cwd: sessionCwd,
           mcpServers: options.mcpServers ?? [],
+          ...(sessionMeta ? { _meta: sessionMeta } : {}),
         } satisfies EffectAcpSchema.LoadSessionRequest;
         const sessionLoadTimeout = Duration.fromInputUnsafe(
           options.sessionLoadTimeout ?? defaultSessionLoadTimeout,
@@ -843,6 +851,7 @@ export const make = (
         const createPayload = {
           cwd: sessionCwd,
           mcpServers: options.mcpServers ?? [],
+          ...(sessionMeta ? { _meta: sessionMeta } : {}),
         } satisfies EffectAcpSchema.NewSessionRequest;
         const created = yield* runLoggedRequest(
           "session/new",

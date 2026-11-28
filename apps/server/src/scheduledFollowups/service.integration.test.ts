@@ -160,7 +160,7 @@ async function harness(persistence?: { readonly dbPath: string; readonly baseDir
         projectId: null,
         title: "Synthetic scheduler chat",
         modelSelection: { instanceId: ProviderInstanceId.make(driver), model: "test-model" },
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         interactionMode: "default",
         branch: null,
         worktreePath: null,
@@ -184,7 +184,7 @@ async function harness(persistence?: { readonly dbPath: string; readonly baseDir
           status,
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: turnId,
           lastError: status === "error" ? "Synthetic failure" : null,
           updatedAt: DateTime.formatIso(DateTime.makeUnsafe(milliseconds)),
@@ -486,6 +486,9 @@ describe("session scheduling commit-time authority", () => {
     const h = await harness();
     const threadId = await h.createThread("permission-review");
     const authority = await grant(h, threadId);
+    await h.run(
+      h.sql`UPDATE projection_threads SET runtime_mode = 'approval-required' WHERE thread_id = ${threadId}`,
+    );
     const saved = await h.run(h.service.save({ ...draft, threadId }));
     await h.run(
       h.sql`UPDATE projection_threads SET runtime_mode = 'full-access' WHERE thread_id = ${threadId}`,
@@ -1470,7 +1473,7 @@ describe("scheduled follow-up real-SQL service", () => {
     expect(restored).toMatchObject({
       id: schedule.id,
       authorizedInstanceId: "codex",
-      permissionCeiling: "approval-required",
+      permissionCeiling: "full-access",
       revision: 1,
       runCount: 1,
     });

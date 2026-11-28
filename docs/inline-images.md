@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-23 15:31:43 JST (UTC+0900)
 
-Cafe enables assistant-local image publication for Codex and Claude. Other providers keep their existing behavior.
+Cafe enables assistant-local image publication for Codex, Claude, and Gemini. Other providers keep their existing behavior.
 
 Codex's native `imageGeneration` items may contain inline bytes or an opaque
 attachment `fileId`. Cafe retains their lifecycle presentation but does not
@@ -38,7 +38,7 @@ Include ordinary Markdown in a Codex or Claude assistant reply:
 
 Use forward slashes for native drive paths. Image reference definitions also work. The backend parses completed Markdown nodes; code examples, ordinary links and incomplete image syntax do not authorize publication. Viewing an image with a provider tool remains separate from embedding it in the user-facing reply.
 
-Supported formats are PNG, JPEG, GIF and WebP, identified from their bytes. Limits are 8 MiB per image, 16,384 pixels per side, 40 million pixels, and eight unique image destinations per message. SVG, raw HTML, data URLs and `file://` imports are not supported by the local publication path. Existing ordinary HTTP image rendering is unchanged.
+Supported formats are PNG, JPEG, GIF and WebP, identified from their bytes. Limits are 8 MiB per image, 16,384 pixels per side, 40 million pixels, and eight unique image destinations per message. Local empty-authority `file:///` URIs pointing inside the workspace roots are unwrapped to match the renderer's file URI rewrite; remote `file://host/...` authorities, SVG, raw HTML and data URLs remain unsupported by the local publication path. Existing ordinary HTTP image rendering is unchanged.
 
 In the desktop app, right-click **Copy Image** preserves a GIF's original encoded
 bytes, including all frames and timing, rather than copying its displayed frame.

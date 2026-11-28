@@ -3149,6 +3149,36 @@ it.effect(
   },
 );
 
+it.effect("preserves an existing restricted Codex owner until it can close idle", () => {
+  const factory = makeRuntimeFactory();
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("access-upgrade");
+    const original = yield* adapter.startSession({ threadId, runtimeMode: "approval-required" });
+    const runtime = factory.lastRuntime!;
+    runtime.closeIfIdleImpl.mockResolvedValue(false);
+    const input = {
+      threadId,
+      runtimeMode: "full-access" as const,
+      resumeCursor: original.resumeCursor,
+    };
+    const denied = yield* adapter.startSession(input).pipe(Effect.result);
+    assert.equal(denied._tag, "Failure");
+    if (denied._tag === "Failure")
+      assert.equal(
+        "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+        "chat-access-upgrade-active",
+      );
+    assert.equal(runtime.closeImpl.mock.calls.length, 0);
+    assert.equal(factory.runtimes.length, 1);
+
+    runtime.closeIfIdleImpl.mockResolvedValue(true);
+    const replacement = yield* adapter.startSession(input);
+    assert.equal(replacement.runtimeMode, "full-access");
+    assert.deepEqual(factory.lastRuntime?.options.resumeCursor, original.resumeCursor);
+  }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+});
+
 it.effect(
   "applies combined chat context and subagent overrides through one final idle admission and omits native Reset",
   () => {

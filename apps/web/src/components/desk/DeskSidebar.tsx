@@ -2,7 +2,6 @@ import { useUiLocale } from "~/i18n";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId, ScopedThreadRef } from "@cafecode/contracts";
-import { autoAnimate } from "@formkit/auto-animate";
 import { PanelsTopLeftIcon, PencilIcon, XIcon } from "lucide-react";
 import {
   Fragment,
@@ -49,6 +48,7 @@ import {
   sidebarGroupKeysContaining,
   type SidebarThreadGroupNode,
 } from "../sidebar/threadGroups.logic";
+import { attachSidebarListAnimation } from "../sidebar/sidebarListAnimation";
 import { Button } from "../ui/button";
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -56,9 +56,6 @@ import { buildDeskSidebarEntries, hasDeskTargetWork } from "./deskSidebar.logic"
 import { useDeskTabMetadata } from "./useDeskTabMetadata";
 import { useDeskChatActions } from "./useDeskChatActions";
 import { useOpenDeskSidebarChat } from "./useOpenDeskSidebarChat";
-
-/** Matches the Projects lists so open, close and reorder move the same way. */
-const DESK_LIST_ANIMATION_OPTIONS = { duration: 180, easing: "ease-out" } as const;
 
 type SidebarMenuOwnership = {
   readonly claim: () => symbol;
@@ -630,13 +627,6 @@ export function DeskSidebar({
     },
     [],
   );
-  // Rows animate in, out and between positions (docs/style-guide.md §8).
-  const animatedListsRef = useRef(new WeakSet<HTMLElement>());
-  const attachListAutoAnimate = useCallback((node: HTMLElement | null) => {
-    if (!node || animatedListsRef.current.has(node)) return;
-    autoAnimate(node, DESK_LIST_ANIMATION_OPTIONS);
-    animatedListsRef.current.add(node);
-  }, []);
   return (
     <section
       aria-label={uiText("Desk open chats", undefined, undefined, uiLocale)}
@@ -841,7 +831,7 @@ export function DeskSidebar({
               }}
             />
             <SidebarMenuSub
-              ref={attachListAutoAnimate}
+              ref={attachSidebarListAnimation}
               className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0"
             >
               {roots.map((entry) =>

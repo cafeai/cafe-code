@@ -19,7 +19,6 @@ import { applyInterfaceScalePercent } from "../interfaceScale";
 import { Button } from "./ui/button";
 import { ActivityHeatmap } from "./stats/ActivityHeatmap";
 import { ComposerDictationButton } from "./chat/ComposerDictationButton";
-import { CLAUDE_PERMISSION_MODE_OPTIONS } from "./chat/claudePermissionMode";
 import { ThreadStatusLabel } from "./ThreadStatusLabel";
 import { getThreadStatusPill } from "./Sidebar.logic";
 
@@ -27,7 +26,22 @@ const originalLocale = getUiLocale();
 const originalLang = document.documentElement.lang;
 const originalDirection = document.documentElement.dir;
 const workingStatus = getThreadStatusPill("Working");
-const permissionPresentation = { options: CLAUDE_PERMISSION_MODE_OPTIONS };
+const historicalModePresentation = {
+  options: [
+    {
+      id: "default",
+      get label() {
+        return uiText("Full access");
+      },
+    },
+    {
+      id: "plan",
+      get label() {
+        return uiText("Plan");
+      },
+    },
+  ],
+};
 
 // The parent props remain identical while the locale changes. Exercise actual
 // memoized controls, the source-owned lazy table and the existing status helper
@@ -41,7 +55,7 @@ const MemoizedLanguageSurface = memo(function MemoizedLanguageSurface({
   onMount: () => void;
   onUnmount: () => void;
 }) {
-  const presentation = useUiPresentation(permissionPresentation);
+  const presentation = useUiPresentation(historicalModePresentation);
   const options = useMemo(() => presentation.options, [presentation]);
   const [draft, setDraft] = useState("/opaque/{name} draft 日本語 한국어");
   useEffect(() => {
@@ -61,7 +75,7 @@ const MemoizedLanguageSurface = memo(function MemoizedLanguageSurface({
         onToggle={onAction}
       />
       <ThreadStatusLabel status={workingStatus} />
-      <select aria-label="Synthetic permission options" defaultValue="plan">
+      <select aria-label="Synthetic workflow options" defaultValue="plan">
         {options.map((option) => (
           <option key={option.id} value={option.id}>
             {option.label}
@@ -426,7 +440,7 @@ describe("bundled interface formatting", () => {
       const richAction = screen
         .getByRole("button", { name: "Opaque action", exact: true })
         .element();
-      const originalIds = CLAUDE_PERMISSION_MODE_OPTIONS.map(({ id }) => id);
+      const originalIds = historicalModePresentation.options.map(({ id }) => id);
       for (const [locale, directLabel, helperLabel, optionLabel, richLabel] of [
         ["ja", "音声入力を停止", "作業中", "計画", "再試行中…"],
         ["ko", "받아쓰기 중지", "작업 중", "계획", "재시도 중…"],
@@ -455,7 +469,7 @@ describe("bundled interface formatting", () => {
         await expect
           .element(textarea)
           .toHaveValue("untouched command /plan --exact-owner 日本語 한국어");
-        expect(CLAUDE_PERMISSION_MODE_OPTIONS.map(({ id }) => id)).toEqual(originalIds);
+        expect(historicalModePresentation.options.map(({ id }) => id)).toEqual(originalIds);
         expect(control?.getAttribute("data-composer-dictation-phase")).toBe("recording");
         expect(control?.getAttribute("aria-pressed")).toBe("true");
         expect(onMount).toHaveBeenCalledTimes(1);

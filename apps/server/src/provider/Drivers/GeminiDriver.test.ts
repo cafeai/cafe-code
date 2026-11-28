@@ -276,14 +276,31 @@ it.live(
 
       const needsVerification = yield* instance.snapshot.refresh;
       assert.equal(needsVerification.auth.status, "unauthenticated");
-      assert.deepEqual(needsVerification.authActions, { login: true, deviceCodeLogin: true });
+      assert.deepEqual(needsVerification.authActions, {
+        login: true,
+        deviceCodeLogin: true,
+        verificationRequired: true,
+      });
       assert.include(needsVerification.message ?? "", "additional verification");
       assert.notInclude(needsVerification.message ?? "", verificationUrl);
 
-      // Run headless login while post-login catalog check still requires verification.
+      // Opening verification when verification is pending refreshes directly without forcing OAuth.
+      const directEvents: ServerProviderDeviceLoginEvent[] = [];
+      yield* instance.adapter.loginDeviceCode!(Effect.succeed(true)).pipe(
+        Stream.runForEach((event) =>
+          Effect.sync(() => {
+            directEvents.push(event);
+          }),
+        ),
+      );
+      assert.deepEqual(directEvents, [{ type: "verification-required", verificationUrl }]);
+
+      // Explicit account switch (forceLogin) still runs headless OAuth and surfaces verification if still required.
       const events: ServerProviderDeviceLoginEvent[] = [];
       const gotOAuth = yield* Deferred.make<string>();
-      const loginFiber = yield* instance.adapter.loginDeviceCode!(Effect.succeed(false)).pipe(
+      const loginFiber = yield* instance.adapter.loginDeviceCode!(Effect.succeed(false), {
+        forceLogin: true,
+      }).pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
             events.push(event);
@@ -300,23 +317,86 @@ it.live(
       assert.equal(events[0]?.type, "oauth-code");
       assert.deepEqual(events[1], { type: "verification-required", verificationUrl });
 
-      // Once verified, login + refresh completes as authenticated.
+      // Once verified, refreshing or opening verification completes as authenticated.
       catalogErrorCode = undefined;
       catalogErrorMessage = undefined;
       const verifiedEvents: ServerProviderDeviceLoginEvent[] = [];
-      const gotOAuth2 = yield* Deferred.make<string>();
-      const loginFiber2 = yield* instance.adapter.loginDeviceCode!(Effect.succeed(false)).pipe(
+      yield* instance.adapter.loginDeviceCode!(Effect.succeed(false)).pipe(
         Stream.runForEach((event) =>
-          Effect.gen(function* () {
+          Effect.sync(() => {
             verifiedEvents.push(event);
-            if (event.type === "oauth-code") yield* Deferred.succeed(gotOAuth2, event.loginId);
           }),
         ),
-        Effect.forkChild,
       );
-      const loginId2 = yield* Deferred.await(gotOAuth2);
-      yield* instance.adapter.submitLoginCode!({ loginId: loginId2, code: "valid-code" });
-      yield* Fiber.join(loginFiber2);
-      assert.equal(verifiedEvents[1]?.type, "authenticated");
+      assert.deepEqual(verifiedEvents, [{ type: "authenticated" }]);
+    }).pipe(Effect.provide(configLayer)),
+);
+
+it.live(
+  "detects Gemini account verification required by headless /usage even when ACP model discovery succeeds",
+  () =>
+    Effect.gen(function* () {
+      const native = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const verificationUrl =
+        "https://accounts.google.com/v3/signin/continue?plt=fresh-token&continue=https%3A%2F%2Fdevelopers.google.com%2Fgemini-code-assist%2Fauth%2Fauth_success_gemini&sarp=1&scc=1&flowName=GlifWebSignIn&authuser";
+      let usageErrorMessage: string | undefined =
+        `Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue.\n\nPlease verify your account in your browser to continue:\n${verificationUrl}`;
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (command._tag !== "StandardCommand" || command.command !== process.execPath) {
+          return native.spawn(command);
+        }
+        return native.spawn(
+          ChildProcess.make(command.command, [fixture, ...command.args], {
+            ...command.options,
+            env: {
+              ...command.options.env,
+              ...(usageErrorMessage === undefined
+                ? {}
+                : { CAFE_GEMINI_FIXTURE_USAGE_ERROR_MESSAGE: usageErrorMessage }),
+            },
+          }),
+        );
+      });
+      const instance = yield* GeminiDriver.create({
+        instanceId: ProviderInstanceId.make("test-antigravity-usage-verify"),
+        displayName: undefined,
+        enabled: true,
+        environment: [],
+        processEnvironment: { CAFE_GEMINI_FIXTURE_NATIVE_VERSION: "1.5.16" },
+        config: { ...GeminiDriver.defaultConfig(), binaryPath: process.execPath },
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+
+      const needsVerification = yield* instance.snapshot.refresh;
+      assert.equal(needsVerification.status, "warning");
+      assert.equal(needsVerification.auth.status, "unauthenticated");
+      assert.equal(needsVerification.version, "1.5.16");
+      assert.deepEqual(needsVerification.models, []);
+      assert.isUndefined(needsVerification.accountRateLimits);
+      assert.deepEqual(needsVerification.authActions, {
+        login: true,
+        deviceCodeLogin: true,
+        verificationRequired: true,
+      });
+      assert.include(needsVerification.message ?? "", "additional verification");
+      assert.notInclude(needsVerification.message ?? "", verificationUrl);
+
+      // Direct verification fetches a fresh verification URL without requiring idle sessions or OAuth.
+      const events: ServerProviderDeviceLoginEvent[] = [];
+      yield* instance.adapter.loginDeviceCode!(Effect.succeed(true)).pipe(
+        Stream.runForEach((event) =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
+        ),
+      );
+      assert.deepEqual(events, [{ type: "verification-required", verificationUrl }]);
+
+      // Once verified in the browser, refreshing recovers models and quota cleanly.
+      usageErrorMessage = undefined;
+      const verified = yield* instance.snapshot.refresh;
+      assert.equal(verified.status, "ready");
+      assert.equal(verified.auth.status, "authenticated");
+      assert.isDefined(verified.accountRateLimits);
+      assert.deepEqual(verified.authActions, { login: true, deviceCodeLogin: true });
     }).pipe(Effect.provide(configLayer)),
 );

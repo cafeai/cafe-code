@@ -495,7 +495,7 @@ if (JSON.stringify(args) === JSON.stringify(["--version"])) {
               expect(allowed.auth.status).toBe("authenticated");
               expect(allowed.sandbox).toEqual({ status: "not-checked" });
               expect(allowed.message).toBe(
-                "Grok is ready for Full access without a sandbox. Protected access modes and Plan still require a working sandbox.",
+                "Grok is ready for Full access without a sandbox. Text generation helpers still require a working sandbox.",
               );
 
               for (const settings of [

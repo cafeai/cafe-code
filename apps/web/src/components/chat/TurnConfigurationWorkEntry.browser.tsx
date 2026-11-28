@@ -43,7 +43,7 @@ describe("turn configuration work-log row", () => {
       try {
         const settings = document.querySelector<HTMLElement>("[data-turn-configuration-settings]")!;
         expect(settings.textContent).toBe(
-          `GPT-6.1 Sol · Ultra · ${fast} · Codex Personal · Build · Full access`,
+          `GPT-6.1 Sol · Ultra · ${fast} · Codex Personal · Full access`,
         );
         expect(settings.textContent).not.toContain("Default");
         settings.focus();
@@ -86,7 +86,7 @@ describe("turn configuration work-log row", () => {
         const settings = row.querySelector<HTMLElement>("[data-turn-configuration-settings]")!;
         await expect.element(settings).toBeVisible();
         expect(settings.textContent).toBe(
-          `${snapshot.modelDisplayName} · Ultra · Fast on · ${snapshot.providerDisplayName} · Build · Full access`,
+          `${snapshot.modelDisplayName} · Ultra · Fast on · ${snapshot.providerDisplayName} · Full access`,
         );
         expect(pane.scrollWidth).toBeLessThanOrEqual(pane.clientWidth + 1);
         expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);

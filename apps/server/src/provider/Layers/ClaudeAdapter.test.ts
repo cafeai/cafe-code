@@ -3757,6 +3757,34 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
+  it.effect("retains an active restricted Claude query during an access upgrade", () => {
+    const harness = makeHarness({ environment: {} });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "synthetic test input",
+        attachments: [],
+      });
+      const denied = yield* adapter
+        .startSession({ threadId: THREAD_ID, runtimeMode: "full-access" })
+        .pipe(Effect.result);
+      assert.equal(denied._tag, "Failure");
+      if (denied._tag === "Failure")
+        assert.equal(
+          "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+          "chat-access-upgrade-active",
+        );
+      assert.equal(harness.query.closeCalls, 0);
+      assert.equal(harness.query.interruptCalls.length, 0);
+      assert.equal(harness.createInputs.length, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect(
     "refuses concurrency replacement with an uncertain hidden child after an idle root",
     () => {

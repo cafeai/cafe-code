@@ -2,7 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { EnvironmentId, ThreadId } from "@cafecode/contracts";
 import { VisualizationListResult } from "@cafecode/contracts/visualizationApi";
 import * as Schema from "effect/Schema";
-import { observeVisualizationOwner, useVisualizationTransportRevision } from "./visualizationOwner";
+import {
+  canReadVisualizationHistory,
+  observeVisualizationOwner,
+  useVisualizationTransportRevision,
+} from "./visualizationOwner";
 import {
   createVisualizationHistoryController,
   type VisualizationHistoryState,
@@ -21,6 +25,7 @@ export function useThreadVisualizations(
 ) {
   const scope = JSON.stringify([environmentId, threadId, foreground]);
   const transportRevision = useVisualizationTransportRevision(environmentId);
+  const readable = foreground && threadId !== null && canReadVisualizationHistory(environmentId);
   const previousRevision = useRef({ scope, revision });
   const committed = useRef(scope);
   const reader = useRef<ReturnType<typeof createVisualizationHistoryController> | null>(null);
@@ -36,7 +41,7 @@ export function useThreadVisualizations(
     };
   }, [scope]);
   useEffect(() => {
-    if (!foreground || !threadId) return;
+    if (!readable || !threadId) return;
     let stopped = false;
     let scopedReader: ReturnType<typeof createVisualizationHistoryController> | undefined;
     const owner = observeVisualizationOwner(environmentId, () => {
@@ -62,14 +67,14 @@ export function useThreadVisualizations(
       if (reader.current === scopedReader) reader.current = null;
       owner.dispose();
     };
-  }, [environmentId, threadId, foreground, scope, transportRevision]);
+  }, [environmentId, threadId, readable, scope, transportRevision]);
   useEffect(() => {
     const previous = previousRevision.current;
     previousRevision.current = { scope, revision };
     if (previous.scope === scope && previous.revision !== revision) reader.current?.invalidate();
   }, [scope, revision]);
   return {
-    ...(state.scope === scope && foreground ? state.value : EMPTY),
+    ...(state.scope === scope && readable ? state.value : EMPTY),
     observeViewport: useCallback(
       (value: VisualizationHistoryViewport) => {
         viewport.current = { scope, value };

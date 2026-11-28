@@ -24,7 +24,6 @@ import {
   mountChatView,
   createSnapshotWithLongProposedPlan,
   createSnapshotWithPendingUserInput,
-  createSnapshotWithPlanFollowUpPrompt,
 } from "./ChatViewBrowser.shared";
 import {
   MessageId,
@@ -192,118 +191,6 @@ describe("ChatView full app (layout)", () => {
               risk: "Conservative",
             },
           });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("keeps plan follow-up footer actions fused and aligned after a real resize", async () => {
-    const mounted = await mountChatView({
-      viewport: WIDE_FOOTER_VIEWPORT,
-      snapshot: createSnapshotWithPlanFollowUpPrompt(),
-    });
-
-    try {
-      const footer = await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
-        "Unable to find composer footer.",
-      );
-      const initialModelPicker = await waitForElement(
-        findComposerProviderModelPicker,
-        "Unable to find provider model picker.",
-      );
-      const initialModelPickerOffset =
-        initialModelPicker.getBoundingClientRect().left - footer.getBoundingClientRect().left;
-      const initialImplementButton = await waitForButtonByText("Implement");
-      const initialImplementWidth = initialImplementButton.getBoundingClientRect().width;
-
-      await waitForElement(
-        () =>
-          document.querySelector<HTMLButtonElement>('button[aria-label="Implementation actions"]'),
-        "Unable to find implementation actions trigger.",
-      );
-
-      await mounted.setContainerSize({
-        width: 440,
-        height: WIDE_FOOTER_VIEWPORT.height,
-      });
-      await expectComposerActionsContained();
-
-      const implementButton = await waitForButtonByText("Implement");
-      const implementActionsButton = await waitForElement(
-        () =>
-          document.querySelector<HTMLButtonElement>('button[aria-label="Implementation actions"]'),
-        "Unable to find implementation actions trigger.",
-      );
-
-      await vi.waitFor(
-        () => {
-          const implementRect = implementButton.getBoundingClientRect();
-          const implementActionsRect = implementActionsButton.getBoundingClientRect();
-          const compactModelPicker = findComposerProviderModelPicker();
-          expect(compactModelPicker).toBeTruthy();
-
-          const compactModelPickerOffset =
-            compactModelPicker!.getBoundingClientRect().left - footer.getBoundingClientRect().left;
-
-          expect(Math.abs(implementRect.right - implementActionsRect.left)).toBeLessThanOrEqual(1);
-          expect(Math.abs(implementRect.top - implementActionsRect.top)).toBeLessThanOrEqual(1);
-          expect(Math.abs(implementRect.width - initialImplementWidth)).toBeLessThanOrEqual(1);
-          expect(Math.abs(compactModelPickerOffset - initialModelPickerOffset)).toBeLessThanOrEqual(
-            1,
-          );
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("compacts the footer when a wide desktop follow-up layout starts overflowing", async () => {
-    const mounted = await mountChatView({
-      viewport: WIDE_FOOTER_VIEWPORT,
-      snapshot: createSnapshotWithPlanFollowUpPrompt({
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5.3-codex-spark",
-        },
-        planMarkdown:
-          "# Imaginary Long-Range Plan: Cafe Code Adaptive Orchestration and Safe-Delay Execution Initiative",
-      }),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          clientSettings: {
-            ...nextFixture.serverConfig.clientSettings,
-            autoOpenPlanSidebar: false,
-          },
-        };
-      },
-    });
-
-    try {
-      await waitForButtonByText("Implement");
-
-      await mounted.setContainerSize({
-        width: 804,
-        height: WIDE_FOOTER_VIEWPORT.height,
-      });
-
-      await expectComposerActionsContained();
-
-      await vi.waitFor(
-        () => {
-          const footer = document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]');
-          const actions = document.querySelector<HTMLElement>(
-            '[data-chat-composer-actions="right"]',
-          );
-
-          expect(footer?.dataset.chatComposerFooterCompact).toBe("true");
-          expect(actions?.dataset.chatComposerPrimaryActionsCompact).toBe("true");
         },
         { timeout: 8_000, interval: 16 },
       );

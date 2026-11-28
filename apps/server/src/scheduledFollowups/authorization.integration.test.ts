@@ -100,7 +100,7 @@ async function harness() {
       projectId: null,
       title: "Isolated scheduler admission",
       modelSelection,
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       interactionMode: "default",
       branch: null,
       worktreePath: null,
@@ -125,7 +125,7 @@ async function harness() {
       WHERE thread_id = ${threadId}`);
     await run(sql`INSERT INTO projection_thread_sessions
       (thread_id,status,provider_name,provider_instance_id,runtime_mode,active_turn_id,last_error,updated_at)
-      VALUES (${threadId},'running','codex',${modelSelection.instanceId},'approval-required',${turnId},NULL,${SESSION_UPDATED})`);
+      VALUES (${threadId},'running','codex',${modelSelection.instanceId},'full-access',${turnId},NULL,${SESSION_UPDATED})`);
   };
   const shell = async () => {
     const value = await run(projections.getThreadShellById(threadId));

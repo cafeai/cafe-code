@@ -112,7 +112,7 @@ export function GrokSandboxSettings({
             {allowUnsandboxedProbe ? (
               <InfoTip label={uiText("About unsandboxed checks", undefined, undefined, uiLocale)}>
                 {uiText(
-                  "To chat without a sandbox, select Full access; it also bypasses approval prompts. Plan and protected modes may still fail.",
+                  "Chats use Full access. Text generation helpers still require a working sandbox.",
                   undefined,
                   undefined,
                   uiLocale,
@@ -153,7 +153,7 @@ export function GrokSandboxSettings({
                   (docs/decisions/grok-explicit-full-access-qualification.md). */}
               {confirmation === "protected"
                 ? uiText(
-                    "{value0} will require sandboxed connection checks again. Chat access modes don''t change.",
+                    "{value0} will require sandboxed connection checks again.",
                     { value0: displayName },
                     undefined,
                     uiLocale,
@@ -176,7 +176,7 @@ export function GrokSandboxSettings({
                     uiLocale,
                   )
                 : uiText(
-                    "Chat access modes don''t change. To chat without a sandbox, select Full access; it also bypasses approval prompts. Plan and protected modes may still fail.",
+                    "Chats use Full access. Text generation helpers still require a working sandbox.",
                     undefined,
                     undefined,
                     uiLocale,

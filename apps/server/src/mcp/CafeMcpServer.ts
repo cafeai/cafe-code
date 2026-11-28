@@ -20,6 +20,7 @@ import * as NodePath from "node:path";
 
 import {
   CommandId,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   MessageId,
   ProjectId,
@@ -954,6 +955,14 @@ function registerThreadTools(
   dependencies: CafeMcpDependencies,
   options: CafeMcpServerOptions,
 ): void {
+  // Keep the legacy parser and its defaults to preserve the exact argument
+  // hash on unexpired operation receipts. Access is fixed by the chat policy.
+  const legacyRuntimeMode = runtimeMode.describe(
+    "Deprecated receipt field. All chats use Full access.",
+  );
+  const legacyInteractionMode = interactionMode.describe(
+    "Deprecated receipt field. Use default for Full access.",
+  );
   server.registerTool(
     "create_thread",
     {
@@ -968,8 +977,8 @@ function registerThreadTools(
         providerInstanceId: providerInstanceId.optional(),
         model: nonEmptyString.optional(),
         providerOptions: z.array(providerOption).optional(),
-        runtimeMode: runtimeMode.default(DEFAULT_RUNTIME_MODE),
-        interactionMode: interactionMode.default("default"),
+        runtimeMode: legacyRuntimeMode.default(DEFAULT_RUNTIME_MODE),
+        interactionMode: legacyInteractionMode.default("default"),
         branch: nonEmptyString.nullable().default(null),
         worktreePath: nonEmptyString.nullable().default(null),
       },
@@ -983,13 +992,18 @@ function registerThreadTools(
         providerInstanceId: selectedProviderInstanceId,
         model,
         providerOptions,
-        runtimeMode: selectedRuntimeMode,
         interactionMode: selectedInteractionMode,
         branch,
         worktreePath,
         groupId,
         description,
       } = args;
+      if (selectedInteractionMode !== DEFAULT_PROVIDER_INTERACTION_MODE) {
+        throw new McpToolError(
+          "invalid_request",
+          "Chats use Full access without a selectable workflow.",
+        );
+      }
       const requestId = requestIdOf(args);
       const projectOption =
         projectId === null
@@ -1025,8 +1039,8 @@ function registerThreadTools(
           projectId: project?.id ?? null,
           title,
           modelSelection: selection,
-          runtimeMode: selectedRuntimeMode,
-          interactionMode: selectedInteractionMode,
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           branch,
           worktreePath,
           ...(groupId !== undefined ? { groupId: ThreadGroupId.make(groupId) } : {}),
@@ -1047,7 +1061,7 @@ function registerThreadTools(
     {
       title: "Update a Cafe Code thread",
       description:
-        "Rename or move a thread, or set its provider, model, provider options, runtime mode, and interaction mode. Set groupId to move an existing unarchived chat (with its owned groups) into a live group, or null to return it to top level. Set originClassification to correct its human/agent/unknown label. Group and label edits preserve the exact chat, transcript, project, provider settings and running work; they grant no authority and never rewrite creation provenance.",
+        "Rename or move a thread, or set its provider, model, and provider options. Set groupId to move an existing unarchived chat (with its owned groups) into a live group, or null to return it to top level. Set originClassification to correct its human/agent/unknown label. Group and label edits preserve the exact chat, transcript, project, provider settings and running work. They grant no authority and never rewrite creation provenance.",
       inputSchema: {
         threadId: entityId,
         groupId: groupIdInput
@@ -1062,8 +1076,8 @@ function registerThreadTools(
         providerInstanceId: providerInstanceId.optional(),
         model: nonEmptyString.optional(),
         providerOptions: z.array(providerOption).optional(),
-        runtimeMode: runtimeMode.optional(),
-        interactionMode: interactionMode.optional(),
+        runtimeMode: legacyRuntimeMode.optional(),
+        interactionMode: legacyInteractionMode.optional(),
         branch: nonEmptyString.nullable().optional(),
         worktreePath: nonEmptyString.nullable().optional(),
         description: threadDescriptionInput
@@ -1089,6 +1103,18 @@ function registerThreadTools(
       worktreePath,
       description,
     }) => {
+      if (selectedRuntimeMode !== undefined && selectedRuntimeMode !== DEFAULT_RUNTIME_MODE) {
+        throw new McpToolError("invalid_request", "Full access is the only chat access policy.");
+      }
+      if (
+        selectedInteractionMode !== undefined &&
+        selectedInteractionMode !== DEFAULT_PROVIDER_INTERACTION_MODE
+      ) {
+        throw new McpToolError(
+          "invalid_request",
+          "Chats use Full access without a selectable workflow.",
+        );
+      }
       const threadOption = await runEffect(
         dependencies.projectionSnapshotQuery.getThreadShellById(ThreadId.make(threadId)),
         "Failed to load the thread.",
@@ -1149,35 +1175,6 @@ function registerThreadTools(
             ...(worktreePath !== undefined ? { worktreePath } : {}),
           }),
           "Failed to update thread metadata.",
-        );
-        sequences.push(result.sequence);
-      }
-      if (selectedRuntimeMode !== undefined && selectedRuntimeMode !== thread.runtimeMode) {
-        const result = await runEffect(
-          dispatch(dependencies, {
-            type: "thread.runtime-mode.set",
-            commandId: commandId(),
-            threadId: thread.id,
-            runtimeMode: selectedRuntimeMode,
-            createdAt: nowIso(),
-          }),
-          "Failed to update the thread runtime mode.",
-        );
-        sequences.push(result.sequence);
-      }
-      if (
-        selectedInteractionMode !== undefined &&
-        selectedInteractionMode !== thread.interactionMode
-      ) {
-        const result = await runEffect(
-          dispatch(dependencies, {
-            type: "thread.interaction-mode.set",
-            commandId: commandId(),
-            threadId: thread.id,
-            interactionMode: selectedInteractionMode,
-            createdAt: nowIso(),
-          }),
-          "Failed to update the thread interaction mode.",
         );
         sequences.push(result.sequence);
       }

@@ -1,10 +1,9 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { memo, type PointerEventHandler } from "react";
-import { ArrowUpIcon, ChevronDownIcon, ChevronLeftIcon, LoaderCircleIcon } from "lucide-react";
+import { ArrowUpIcon, ChevronLeftIcon, LoaderCircleIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 
 interface PendingActionState {
   questionIndex: number;
@@ -23,8 +22,6 @@ interface ComposerPrimaryActionsProps {
   connectingStopAvailable?: boolean | undefined;
   backgroundStopAvailable?: boolean | undefined;
   stopInFlight?: boolean | undefined;
-  showPlanFollowUpPrompt: boolean;
-  promptHasText: boolean;
   isSendBusy: boolean;
   isQueueEditing?: boolean;
   isConnecting: boolean;
@@ -36,7 +33,6 @@ interface ComposerPrimaryActionsProps {
   onArmPostSubmitInterruptGuard: () => void;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
-  onImplementPlanInNewThread: () => void;
 }
 
 export const formatPendingPrimaryActionLabel = (input: {
@@ -110,8 +106,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   connectingStopAvailable = false,
   backgroundStopAvailable = false,
   stopInFlight = false,
-  showPlanFollowUpPrompt,
-  promptHasText,
   isSendBusy,
   isQueueEditing = false,
   isConnecting,
@@ -123,7 +117,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   onArmPostSubmitInterruptGuard,
   onPreviousPendingQuestion,
   onInterrupt,
-  onImplementPlanInNewThread,
 }: ComposerPrimaryActionsProps) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
@@ -258,68 +251,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       </div>
     ) : (
       (stopAction ?? sendAction)
-    );
-  }
-
-  if (showPlanFollowUpPrompt) {
-    if (promptHasText) {
-      return (
-        <Button
-          type="submit"
-          size="sm"
-          className={cn("rounded-full", compact ? "h-9 px-3 sm:h-8" : "h-9 px-4 sm:h-8")}
-          {...pointerFocusProps}
-          disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
-        >
-          {isConnecting || isSendBusy
-            ? uiText("Sending…", undefined, undefined, uiLocale)
-            : uiText("Refine", undefined, undefined, uiLocale)}
-        </Button>
-      );
-    }
-
-    return (
-      <div data-chat-composer-implement-actions="true" className="flex items-center justify-end">
-        <Button
-          type="submit"
-          size="sm"
-          className="h-9 rounded-l-full rounded-r-none px-4 sm:h-8"
-          {...pointerFocusProps}
-          disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
-        >
-          {isConnecting || isSendBusy
-            ? uiText("Sending…", undefined, undefined, uiLocale)
-            : uiText("Implement", undefined, undefined, uiLocale)}
-        </Button>
-        <Menu>
-          {/* This popup owns focus. Preventing its pointer default, unlike an
-              immediate Send/Implement action, suppresses Base UI activation. */}
-          <MenuTrigger
-            render={
-              <Button
-                size="sm"
-                variant="default"
-                className={cn(
-                  "h-9 rounded-l-none rounded-r-full border-l-white/12 sm:h-8",
-                  compact ? "px-1" : "px-2",
-                )}
-                aria-label={uiText("Implementation actions", undefined, undefined, uiLocale)}
-                disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
-              />
-            }
-          >
-            <ChevronDownIcon className="size-3.5" />
-          </MenuTrigger>
-          <MenuPopup align="end" side="top">
-            <MenuItem
-              disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
-              onClick={() => void onImplementPlanInNewThread()}
-            >
-              {uiText("Implement in a new chat", undefined, undefined, uiLocale)}
-            </MenuItem>
-          </MenuPopup>
-        </Menu>
-      </div>
     );
   }
 

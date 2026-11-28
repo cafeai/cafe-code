@@ -1399,6 +1399,27 @@ function sessionStatusToSettledLatestTurnState(status: OrchestrationSessionStatu
   return null;
 }
 
+function closeStreamingMessagesForTerminalTurn(
+  messages: readonly ChatMessage[],
+  turnId: TurnId,
+  completedAt: string,
+): ChatMessage[] {
+  let changed = false;
+  const next = messages.map((message) => {
+    if (!message.streaming || message.turnId !== turnId) {
+      return message;
+    }
+    changed = true;
+    return {
+      ...message,
+      streaming: false,
+      completedAt:
+        message.completedAt === undefined ? completedAt : maxIso(message.completedAt, completedAt),
+    };
+  });
+  return changed ? next : (messages as ChatMessage[]);
+}
+
 function compareActivities(
   left: Thread["activities"][number],
   right: Thread["activities"][number],
@@ -2548,25 +2569,40 @@ function applyEnvironmentOrchestrationEvent(
       );
 
     case "thread.turn-interrupt-requested": {
-      if (event.payload.turnId === undefined) {
-        return state;
-      }
       return updateThreadState(state, event.payload.threadId, (thread) => {
+        const terminalTurnId = event.payload.turnId ?? thread.session?.activeTurnId ?? null;
+        const nextMessages =
+          terminalTurnId !== null
+            ? closeStreamingMessagesForTerminalTurn(
+                thread.messages,
+                terminalTurnId,
+                event.payload.createdAt,
+              )
+            : thread.messages;
         const latestTurn = thread.latestTurn;
-        if (latestTurn === null || latestTurn.turnId !== event.payload.turnId) {
+        const shouldUpdateLatestTurn =
+          event.payload.turnId !== undefined &&
+          latestTurn !== null &&
+          latestTurn.turnId === event.payload.turnId;
+        if (!shouldUpdateLatestTurn && nextMessages === thread.messages) {
           return thread;
         }
         return {
           ...thread,
-          latestTurn: buildLatestTurn({
-            previous: latestTurn,
-            turnId: event.payload.turnId,
-            state: "interrupted",
-            requestedAt: latestTurn.requestedAt,
-            startedAt: latestTurn.startedAt ?? event.payload.createdAt,
-            completedAt: latestTurn.completedAt ?? event.payload.createdAt,
-            assistantMessageId: latestTurn.assistantMessageId,
-          }),
+          messages: nextMessages,
+          ...(shouldUpdateLatestTurn && latestTurn !== null && event.payload.turnId !== undefined
+            ? {
+                latestTurn: buildLatestTurn({
+                  previous: latestTurn,
+                  turnId: event.payload.turnId,
+                  state: "interrupted",
+                  requestedAt: latestTurn.requestedAt,
+                  startedAt: latestTurn.startedAt ?? event.payload.createdAt,
+                  completedAt: latestTurn.completedAt ?? event.payload.createdAt,
+                  assistantMessageId: latestTurn.assistantMessageId,
+                }),
+              }
+            : {}),
           updatedAt: event.occurredAt,
         };
       });
@@ -2631,8 +2667,25 @@ function applyEnvironmentOrchestrationEvent(
                   sourceProposedPlan: thread.pendingSourceProposedPlan,
                 })
               : currentLatestTurn;
+        const nextMessages =
+          event.payload.codexFailedRoot !== undefined
+            ? closeStreamingMessagesForTerminalTurn(
+                thread.messages,
+                event.payload.codexFailedRoot.turnId,
+                event.payload.codexFailedRoot.completedAt,
+              )
+            : event.payload.session.activeTurnId === null &&
+                settledState !== null &&
+                previousActiveTurnId !== null
+              ? closeStreamingMessagesForTerminalTurn(
+                  thread.messages,
+                  previousActiveTurnId,
+                  event.payload.session.updatedAt,
+                )
+              : thread.messages;
         return {
           ...thread,
+          messages: nextMessages,
           session: mergeSessionSnapshot(previousSession, incomingSession),
           error: sanitizeThreadErrorMessage(event.payload.session.lastError),
           // Authoritative provider receipt replaces any renderer-local grant,
@@ -2737,8 +2790,17 @@ function applyEnvironmentOrchestrationEvent(
                 });
               })()
             : thread.latestTurn;
+        const nextMessages =
+          event.payload.status === "missing"
+            ? thread.messages
+            : closeStreamingMessagesForTerminalTurn(
+                thread.messages,
+                event.payload.turnId,
+                event.payload.completedAt,
+              );
         return {
           ...thread,
+          messages: nextMessages,
           turnDiffSummaries,
           latestTurn,
           updatedAt: event.occurredAt,

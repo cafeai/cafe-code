@@ -4546,7 +4546,7 @@ describe("deriveWorkLogEntries context window handling", () => {
     ]);
     expect(entries[0]).toMatchObject({
       label: "Turn accepted · GPT-6.1 Sol · Effort: Ultra · Fast on",
-      detail: "Account: Codex Personal · Build · Full access · Submitted settings",
+      detail: "Account: Codex Personal · Full access · Submitted settings",
       turnConfiguration: configuration,
       tone: "info",
     });
@@ -4637,12 +4637,12 @@ describe("deriveWorkLogEntries context window handling", () => {
     const oldEntries = deriveWorkLogEntries(activities, TurnId.make("old-turn"));
     expect(oldEntries[0]?.label).toBe("Turn accepted · GPT-6.1 Sol · Effort: Ultra · Fast on");
     expect(oldEntries[0]?.detail).toBe(
-      "Account: Original account label · Build · Full access · Submitted settings",
+      "Account: Original account label · Full access · Submitted settings",
     );
     const newEntries = deriveWorkLogEntries(activities, TurnId.make("new-turn"));
     expect(newEntries[0]?.label).toBe("Turn accepted · GPT-6 Astra · Effort: Max · Fast off");
     expect(newEntries[0]?.detail).toBe(
-      "Account: Renamed same account · Build · Full access · Submitted settings",
+      "Account: Renamed same account · Full access · Submitted settings",
     );
   });
 

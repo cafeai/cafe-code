@@ -760,9 +760,7 @@ describe("TaskAtriumBoard", () => {
         '[data-cafe-atrium-turn-configuration="true"]',
       );
       expect(codexConfiguration?.textContent).toContain("GPT-6.1 Sol · Effort: Ultra · Fast on");
-      expect(codexConfiguration?.textContent).toContain(
-        "Account: Codex Personal · Build · Full access",
-      );
+      expect(codexConfiguration?.textContent).toContain("Account: Codex Personal · Full access");
       expect(codexConfiguration?.title).toBe(SUBMITTED_SETTINGS_DESCRIPTION);
 
       const claudeCard = taskCard(host, "Port the ambiance engine to WebGL");
@@ -887,7 +885,7 @@ describe("TaskAtriumBoard", () => {
       // rewrite the accepted turn using today's account/model labels.
       await screen.rerender(<TaskAtriumBoard />);
       expect(taskCard(host, previousTitle).textContent).toContain(
-        "Account: Codex Personal · Build · Full access",
+        "Account: Codex Personal · Full access",
       );
 
       restoreNext = installTurnConfigurationActivities([
@@ -946,7 +944,7 @@ describe("TaskAtriumBoard", () => {
     const longAccount =
       "Codex account with a deliberately long safe display label that must remain inside the task card";
     const primaryText = `${longModel} · Effort: Ultra · Fast on`;
-    const secondaryText = `Account: ${longAccount} · Build · Full access`;
+    const secondaryText = `Account: ${longAccount} · Full access`;
     const restoreConfiguration = installTurnConfigurationActivities([
       {
         activityId: "turn-settings-long",

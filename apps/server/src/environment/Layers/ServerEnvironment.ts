@@ -87,6 +87,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
     capabilities: {
       repositoryIdentity: true,
       standaloneChats: true,
+      fullAccessChats: true,
     },
   };
 

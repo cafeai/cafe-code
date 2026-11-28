@@ -290,6 +290,7 @@ it.live(
     Effect.gen(function* () {
       const { adapter, threadId, modelSelection, start } = yield* makeFixtureAdapter();
       const initialOutput = yield* Deferred.make<void>();
+      const firstFollowUpOutput = yield* Deferred.make<void>();
       const approval = yield* Deferred.make<ApprovalRequestId>();
       const terminal = yield* Deferred.make<void>();
       const nextTerminal = yield* Deferred.make<void>();
@@ -303,6 +304,12 @@ it.live(
             event.payload.delta === "Initial foreground output."
           ) {
             yield* Deferred.succeed(initialOutput, undefined);
+          }
+          if (
+            event.type === "content.delta" &&
+            event.payload.delta === "Follow-up reached the agent."
+          ) {
+            yield* Deferred.succeed(firstFollowUpOutput, undefined);
           }
           if (event.type === "request.opened" && event.requestId) {
             yield* Deferred.succeed(approval, ApprovalRequestId.make(event.requestId));
@@ -329,9 +336,16 @@ it.live(
         input: "Deliver this follow-up",
       });
       assert.equal(followUp.turnId, root.turnId);
+      yield* Deferred.await(firstFollowUpOutput);
+      const secondFollowUp = yield* adapter.steerTurn({
+        threadId,
+        expectedTurnId: root.turnId,
+        input: "Deliver a second follow-up",
+      });
+      assert.equal(secondFollowUp.turnId, root.turnId);
 
       // The follow-up's actual native callback holds its RPC open after the
-      // first RPC has ended. No clock or mock of the adapter decides ordering.
+      // earlier RPCs have ended. No clock or mock of the adapter decides ordering.
       const request = yield* Deferred.await(approval);
       assert.isFalse(yield* Deferred.isDone(terminal));
       yield* adapter.respondToRequest(threadId, request, "accept");
@@ -356,6 +370,7 @@ it.live(
       assert.deepEqual(transcript, [
         "Initial foreground output.",
         "Follow-up reached the agent.",
+        "Second follow-up reached the agent.",
         "terminal:completed",
       ]);
       const accounting = events.filter((event) => event.type === "thread.usage-accounting.updated");

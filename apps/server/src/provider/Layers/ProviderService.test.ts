@@ -7191,3 +7191,93 @@ validation.layer("ProviderServiceLive validation", (it) => {
     }),
   );
 });
+
+it.effect(
+  "routes active Gemini sendTurn through steerTurn when modelSelection options match and blocks changed options",
+  () =>
+    Effect.gen(function* () {
+      const geminiDriver = ProviderDriverKind.make("gemini");
+      const geminiInstanceId = ProviderInstanceId.make("gemini");
+      const gemini = makeFakeCodexAdapter(geminiDriver);
+      const registry = makeAdapterRegistryMock({
+        [geminiDriver]: {
+          ...gemini.adapter,
+          capabilities: {
+            ...gemini.adapter.capabilities,
+            liveSteer: "supported",
+          },
+        },
+      });
+      const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(SqlitePersistenceTest),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const providerLayer = makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      );
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("thread-gemini-active-options");
+        const activeTurnId = asTurnId("turn-gemini-active");
+        const activeSelection = {
+          instanceId: geminiInstanceId,
+          model: "gemini-4-neon",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        };
+        yield* provider.startSession(threadId, {
+          provider: geminiDriver,
+          providerInstanceId: geminiInstanceId,
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+          interactionMode: "gemini-bypass",
+          modelSelection: activeSelection,
+        });
+        gemini.updateSession(threadId, (current) => ({
+          ...current,
+          status: "running",
+          activeTurnId,
+          interactionMode: "gemini-bypass",
+          model: "gemini-4-neon",
+          modelSelection: activeSelection,
+        }));
+        gemini.sendTurn.mockClear();
+        gemini.steerTurn.mockClear();
+
+        const steered = yield* provider.sendTurn({
+          threadId,
+          interactionMode: "gemini-bypass",
+          modelSelection: activeSelection,
+          input: "steer with matching effort",
+          attachments: [],
+        });
+        assert.equal(steered.turnId, activeTurnId);
+        assert.equal(steered.deliveryKind, "steer");
+        assert.equal(gemini.steerTurn.mock.calls.length, 1);
+        assert.equal(gemini.sendTurn.mock.calls.length, 0);
+
+        gemini.steerTurn.mockClear();
+        gemini.sendTurn.mockClear();
+
+        yield* provider.sendTurn({
+          threadId,
+          interactionMode: "gemini-bypass",
+          modelSelection: {
+            instanceId: geminiInstanceId,
+            model: "gemini-4-neon",
+            options: [{ id: "reasoningEffort", value: "low" }],
+          },
+          input: "do not steer with changed effort",
+          attachments: [],
+        });
+        assert.equal(gemini.steerTurn.mock.calls.length, 0);
+        assert.equal(gemini.sendTurn.mock.calls.length, 1);
+      }).pipe(Effect.provide(providerLayer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);

@@ -131,6 +131,8 @@ import Migration0106 from "./Migrations/106_McpOperations.ts";
 import Migration0107 from "./Migrations/107_RelayPairings.ts";
 import Migration0108 from "./Migrations/108_ThreadGroupsAndOrigin.ts";
 import Migration0109 from "./Migrations/109_McpOperationStorageBudget.ts";
+import Migration0110 from "./Migrations/110_FullAccessChats.ts";
+import Migration0111 from "./Migrations/111_RetirePlanWorkflow.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -256,6 +258,8 @@ export const migrationEntries = [
   [107, "RelayPairings", Migration0107],
   [108, "ThreadGroupsAndOrigin", Migration0108],
   [109, "McpOperationStorageBudget", Migration0109],
+  [110, "FullAccessChats", Migration0110],
+  [111, "RetirePlanWorkflow", Migration0111],
 ] as const;
 
 export const makeMigrationLoader = (

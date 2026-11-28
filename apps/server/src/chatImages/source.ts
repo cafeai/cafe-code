@@ -7,6 +7,35 @@ import { fromMarkdown } from "mdast-util-from-markdown";
 import { CHAT_IMAGE_MAX_BYTES, CHAT_IMAGE_MAX_PER_MESSAGE } from "@cafecode/contracts";
 import { parseImageHeader } from "@cafecode/shared/rasterImageHeader";
 
+function resolveMarkdownImageDestination(raw: string): { source: string; path: string } | null {
+  if (/^file:/iu.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      // Only unwrap local empty-authority file:/// URIs; reject remote hosts,
+      // credentials, queries, and fragments so the frontend rewrite and server
+      // workspace boundary agree on the exact local image path.
+      if (
+        parsed.protocol !== "file:" ||
+        parsed.hostname !== "" ||
+        parsed.username !== "" ||
+        parsed.password !== "" ||
+        parsed.search !== "" ||
+        parsed.hash !== "" ||
+        parsed.pathname.length === 0
+      ) {
+        return null;
+      }
+      const normalizedSource = parsed.pathname.replace(/^\/([A-Za-z]:\/)/u, "$1");
+      const decodedPath = decodeURIComponent(normalizedSource);
+      if (decodedPath.length === 0 || /[\p{Cc}]/u.test(decodedPath)) return null;
+      return { source: normalizeUri(normalizedSource), path: decodedPath };
+    } catch {
+      return null;
+    }
+  }
+  return { source: normalizeUri(raw), path: raw };
+}
+
 export function markdownImageSources(text: string): Array<{ source: string; path: string }> {
   // Parse only completed, bounded messages, never per-token deltas. A regex
   // cannot distinguish examples in code from actual Markdown image nodes.
@@ -21,10 +50,18 @@ export function markdownImageSources(text: string): Array<{ source: string; path
     if ("children" in node) for (const child of node.children) visit(child);
   };
   visit(tree);
-  return [...new Set(images.map((image) => image.url ?? definitions.get(image.identifier ?? "")))]
-    .filter((source): source is string => Boolean(source))
-    .slice(0, CHAT_IMAGE_MAX_PER_MESSAGE)
-    .map((path) => ({ source: normalizeUri(path), path }));
+  const seen = new Set<string>();
+  const resolved: Array<{ source: string; path: string }> = [];
+  for (const image of images) {
+    const raw = image.url ?? definitions.get(image.identifier ?? "");
+    if (!raw) continue;
+    const entry = resolveMarkdownImageDestination(raw);
+    if (!entry || seen.has(entry.source)) continue;
+    seen.add(entry.source);
+    resolved.push(entry);
+    if (resolved.length >= CHAT_IMAGE_MAX_PER_MESSAGE) break;
+  }
+  return resolved;
 }
 
 function inside(root: string, target: string) {

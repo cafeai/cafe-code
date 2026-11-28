@@ -238,4 +238,22 @@ describe("provider status summary copy", () => {
       ).detail,
     ).toBe("Account ready");
   });
+
+  it("shows Verification required when an unauthenticated provider flags verificationRequired", () => {
+    expect(
+      getProviderSummary(
+        makeProvider({
+          driver: ProviderDriverKind.make("gemini"),
+          status: "warning",
+          auth: { status: "unauthenticated" },
+          authActions: { login: true, deviceCodeLogin: true, verificationRequired: true },
+          message:
+            "Google requires additional verification for this account before Gemini can be used.",
+        }),
+      ),
+    ).toEqual({
+      headline: "Verification required",
+      detail: "Google requires additional verification for this account before Gemini can be used.",
+    });
+  });
 });

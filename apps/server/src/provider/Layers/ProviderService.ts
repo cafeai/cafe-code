@@ -31,6 +31,7 @@ import {
   ProviderSendTurnInput,
   ProviderPrepareFailedRootRecoveryInput,
   ProviderReadFailedRootRecoveryInput,
+  ProviderInteractionMode,
   ProviderSessionStartInput,
   ProviderPrepareConversationRollbackInput,
   ProviderConversationRewindIdentity,
@@ -117,6 +118,7 @@ import {
 
 const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const isModelSelection = Schema.is(ModelSelection);
+const isProviderInteractionMode = Schema.is(ProviderInteractionMode);
 const isTurnId = Schema.is(TurnId);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
@@ -466,6 +468,12 @@ function toRuntimePayloadFromSession(
     additionalDirectories: session.additionalDirectories ?? [],
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
+    // These providers bind their mode to the process. Keep the actual mode
+    // across an exact-owner resume, including the distinction between Gemini
+    // Default and a process launched with its native bypass flag.
+    ...(session.provider === "gemini" || session.provider === "grok"
+      ? { interactionMode: session.interactionMode ?? null }
+      : {}),
     // Explicit null clears old evidence if a legacy/unqualified adapter is
     // materialized. Directory payload upserts otherwise merge partial fields.
     subagentRuntimeId: session.subagentRuntimeId ?? null,
@@ -1734,6 +1742,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedMaxConcurrentSubagents = readPersistedMaxConcurrentSubagents(
         input.binding.runtimePayload,
       );
+      const persistedProcessMode = readPersistedString(
+        input.binding.runtimePayload,
+        "interactionMode",
+      );
+      if (input.binding.provider === "gemini" && !isProviderInteractionMode(persistedProcessMode)) {
+        return yield* toValidationError(
+          input.operation,
+          "Gemini's previous process mode could not be verified. Send a new message to reopen the chat with its current policy.",
+        );
+      }
 
       const startInput = {
         threadId: input.binding.threadId,
@@ -1756,6 +1774,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             }
           : {}),
         ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
+        ...((input.binding.provider === "gemini" || input.binding.provider === "grok") &&
+        isProviderInteractionMode(persistedProcessMode)
+          ? { interactionMode: persistedProcessMode }
+          : {}),
         runtimeMode: input.binding.runtimeMode ?? "full-access",
       } satisfies ProviderSessionStartInput;
       const recoveredFromRejectedResumeCursor = yield* Ref.make(false);
@@ -2675,13 +2697,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // from the live adapter inventory, never the durable binding. Pin it
       // through native admission so a later root cannot become the recipient.
       const completedRoot = getCodexRootTurnCompletion(activeSession);
+      const requestedGeminiOptions = input.modelSelection?.options ?? [];
+      const activeGeminiOptions = activeSession?.modelSelection?.options ?? [];
+      const geminiOptionsMatchActiveSession =
+        requestedGeminiOptions.length === 0 ||
+        (requestedGeminiOptions.length === activeGeminiOptions.length &&
+          requestedGeminiOptions.every((requestedOption) =>
+            activeGeminiOptions.some(
+              (activeOption) =>
+                activeOption.id === requestedOption.id &&
+                activeOption.value === requestedOption.value,
+            ),
+          ));
       const admitsGeminiFollowUp =
         routed.adapter.provider !== "gemini" ||
         ((input.interactionMode ?? "default") === (activeSession?.interactionMode ?? "default") &&
           (input.modelSelection === undefined ||
             (input.modelSelection.instanceId === routed.instanceId &&
               input.modelSelection.model === activeSession?.model &&
-              (input.modelSelection.options?.length ?? 0) === 0)));
+              geminiOptionsMatchActiveSession)));
       if (
         routed.adapter.capabilities.liveSteer === "supported" &&
         admitsGeminiFollowUp &&

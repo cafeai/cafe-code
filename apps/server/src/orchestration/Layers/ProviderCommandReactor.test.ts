@@ -359,7 +359,8 @@ describe("ProviderCommandReactor", () => {
           "interactionMode" in input &&
           (input.interactionMode === "default" ||
             input.interactionMode === "plan" ||
-            input.interactionMode === "auto")
+            input.interactionMode === "auto" ||
+            input.interactionMode === "gemini-bypass")
             ? { interactionMode: input.interactionMode }
             : {}),
           ...(typeof input === "object" &&
@@ -725,7 +726,13 @@ describe("ProviderCommandReactor", () => {
           );
         }
         const driverKind = ProviderDriverKind.make(
-          raw.startsWith("claude") ? "claudeAgent" : raw.startsWith("codex") ? "codex" : raw,
+          raw.startsWith("claude")
+            ? "claudeAgent"
+            : raw.startsWith("codex")
+              ? "codex"
+              : raw.startsWith("gemini")
+                ? "gemini"
+                : raw,
         );
         return Effect.succeed({
           instanceId,
@@ -1137,7 +1144,7 @@ describe("ProviderCommandReactor", () => {
             status: "running",
             providerName: "codex",
             providerInstanceId: ProviderInstanceId.make("codex"),
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: turnId,
             lastError: null,
             updatedAt,
@@ -1149,7 +1156,7 @@ describe("ProviderCommandReactor", () => {
         provider: ProviderDriverKind.make("codex"),
         providerInstanceId: ProviderInstanceId.make("codex"),
         status: "running",
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         threadId,
         activeTurnId: turnId,
         resumeCursor: { opaque: `resume-${turnId}` },
@@ -1185,7 +1192,7 @@ describe("ProviderCommandReactor", () => {
         title: "Thread",
         modelSelection: modelSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         branch: null,
         worktreePath: null,
         createdAt: now,
@@ -1497,7 +1504,7 @@ describe("ProviderCommandReactor", () => {
         provider: ProviderDriverKind.make("codex"),
         providerInstanceId: selection.instanceId,
         status: "running",
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         activeTurnId: asTurnId("native-existing"),
         createdAt: command.createdAt,
         updatedAt: command.createdAt,
@@ -1755,7 +1762,7 @@ describe("ProviderCommandReactor", () => {
           commandId: CommandId.make(key),
           threadId,
           message: { messageId: asMessageId(key), role: "user", text: "Hello", attachments: [] },
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: "default",
           ...(modelSelection !== undefined ? { modelSelection } : {}),
           createdAt: DateTime.formatIso(
@@ -1999,7 +2006,7 @@ describe("ProviderCommandReactor", () => {
             additionalDirectories: [path.join(session.cwd!, "different-additional-root")],
           };
         if (reason === "runtime replacement")
-          harness.runtimeSessions[0] = { ...session, runtimeMode: "full-access" };
+          harness.runtimeSessions[0] = { ...session, runtimeMode: "approval-required" };
         await send(
           harness,
           `native-policy-follow-up-${reason}`,
@@ -2149,7 +2156,7 @@ describe("ProviderCommandReactor", () => {
               : {
                   ...commonCommand,
                   type: "thread.turn.start",
-                  runtimeMode: "approval-required",
+                  runtimeMode: "full-access",
                   interactionMode: "default",
                 },
           ),
@@ -2898,7 +2905,7 @@ describe("ProviderCommandReactor", () => {
               ...(priorPolicy !== undefined ? { maxConcurrentSubagents: priorPolicy } : {}),
               status: "ready",
               activeTurnId: null,
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               lastError: null,
               updatedAt: "2026-01-01T00:00:01.000Z",
             },
@@ -3781,7 +3788,7 @@ describe("ProviderCommandReactor", () => {
               ...(prior !== undefined ? { codexContextWindowOverride: prior } : {}),
               status: "ready",
               activeTurnId: null,
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               lastError: null,
               updatedAt: "2026-01-01T00:00:01.000Z",
             },
@@ -3929,7 +3936,7 @@ describe("ProviderCommandReactor", () => {
             text: "Hello",
             attachments: [],
           },
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: "default",
           titleSeed: "Thread",
           createdAt: "2026-01-01T00:00:01.000Z",
@@ -4201,7 +4208,7 @@ describe("ProviderCommandReactor", () => {
       additionalDirectories: readonly string[];
       runtimeMode: string;
     };
-    expect(request.runtimeMode).toBe("approval-required");
+    expect(request.runtimeMode).toBe("full-access");
     expect(request.additionalDirectories).toEqual([]);
     expect(path.dirname(request.cwd)).toBe(
       path.join(path.dirname(harness.stateDir), "standalone-workspaces"),
@@ -4224,7 +4231,7 @@ describe("ProviderCommandReactor", () => {
         provider: ProviderDriverKind.make("codex"),
         providerInstanceId: instance,
         status: "ready",
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         threadId,
         cwd: "/tmp/provider-project",
         additionalDirectories: ["/former-additional-root"],
@@ -4242,7 +4249,7 @@ describe("ProviderCommandReactor", () => {
             status: "ready",
             providerName: "codex",
             providerInstanceId: instance,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
             updatedAt: "2026-01-01T00:00:00.000Z",
@@ -4280,7 +4287,7 @@ describe("ProviderCommandReactor", () => {
             text: "Continue",
             attachments: [],
           },
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: "default",
           createdAt: "2026-01-01T00:00:01.000Z",
         }),
@@ -4361,7 +4368,7 @@ describe("ProviderCommandReactor", () => {
               providerInstanceId: instanceId,
               subagentRuntimeId: owningRuntimeId,
               ...projectedPolicy,
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               activeTurnId: null,
               lastError: "Temporary provider failure",
               updatedAt: at,
@@ -4375,7 +4382,7 @@ describe("ProviderCommandReactor", () => {
         subagentRuntimeId: owningRuntimeId,
         status: "ready",
         threadId,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         model: "gpt-5-codex",
         modelSelection: { instanceId, model: "gpt-5-codex" },
         resumeCursor: { opaque: "existing-native-context" },
@@ -4429,7 +4436,7 @@ describe("ProviderCommandReactor", () => {
             text: originalText,
             attachments: [],
           },
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: "default",
           createdAt: "2026-01-01T00:00:01.000Z",
         }),
@@ -4513,7 +4520,7 @@ describe("ProviderCommandReactor", () => {
           title: "Independent thread",
           modelSelection: { instanceId, model: "gpt-5-codex" },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
           createdAt: "2026-01-01T00:00:11.000Z",
@@ -4534,7 +4541,7 @@ describe("ProviderCommandReactor", () => {
             text: "Independent authorized work",
             attachments: [],
           },
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: "default",
           createdAt: "2026-01-01T00:00:11.000Z",
         }),
@@ -4684,7 +4691,7 @@ describe("ProviderCommandReactor", () => {
               text: "New authorized input after Stop",
               attachments: [],
             },
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             interactionMode: "default",
             createdAt: "2026-01-01T00:00:13.000Z",
           }),
@@ -5037,7 +5044,7 @@ describe("ProviderCommandReactor", () => {
               text: "New input after private recovery exit",
               attachments: [],
             },
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             interactionMode: "default",
             createdAt: "2026-01-01T00:00:12.000Z",
           }),
@@ -5334,7 +5341,7 @@ describe("ProviderCommandReactor", () => {
                 text: "New input",
                 attachments: [],
               },
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               interactionMode: "default",
               createdAt: "2026-01-01T00:00:12.000Z",
             }),
@@ -5601,7 +5608,7 @@ describe("ProviderCommandReactor", () => {
       const replacement = harness.runtimeSessions[0]!;
       expect(replacement.subagentRuntimeId).not.toBe(runtimeId);
       expect(replacement.resumeCursor).toEqual({ opaque: "existing-native-context" });
-      expect(replacement.runtimeMode).toBe("approval-required");
+      expect(replacement.runtimeMode).toBe("full-access");
       const detail = await harness.readThreadDetail(threadId);
       expect(encodeJsonString(detail?.activities)).not.toContain("private-native-root");
       expect(
@@ -5831,7 +5838,7 @@ describe("ProviderCommandReactor", () => {
                 attachments: [],
               },
               modelSelection: { instanceId, model: "gpt-5-codex" },
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               interactionMode: "default",
               runtimeRecovery: {
                 sourceEventSequence: marker.sequence,
@@ -6209,7 +6216,7 @@ describe("ProviderCommandReactor", () => {
                   commandId: CommandId.make("cmd-input-before-running-ack"),
                   threadId,
                   message: newerMessage,
-                  runtimeMode: "approval-required",
+                  runtimeMode: "full-access",
                   interactionMode: "default",
                   createdAt: "2026-01-01T00:00:12.000Z",
                 }),
@@ -6305,7 +6312,7 @@ describe("ProviderCommandReactor", () => {
               commandId: CommandId.make("cmd-retry-input-after-owned-root-completion"),
               threadId,
               message: newerMessage,
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               interactionMode: "default",
               createdAt: completedAt,
             }),
@@ -6403,7 +6410,7 @@ describe("ProviderCommandReactor", () => {
                 text: "New explicit input",
                 attachments: [],
               },
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               interactionMode: "default",
               createdAt: "2026-01-01T00:00:12.000Z",
             }),
@@ -6710,7 +6717,7 @@ describe("ProviderCommandReactor", () => {
                 text: "Use this newly authorized input instead.",
                 attachments: [],
               },
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               interactionMode: "default",
               createdAt: "2026-01-01T00:00:06.000Z",
             }),
@@ -6894,7 +6901,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: "2026-01-01T00:00:01.000Z",
         }),
       );
@@ -6949,7 +6956,7 @@ describe("ProviderCommandReactor", () => {
             status: "stopped",
             providerName: "codex",
             providerInstanceId: ProviderInstanceId.make("codex"),
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
             updatedAt: lostAt,
@@ -7128,7 +7135,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: DateTime.formatIso(DateTime.nowUnsafe()),
         }),
       );
@@ -7275,7 +7282,7 @@ describe("ProviderCommandReactor", () => {
               attachments: [],
             },
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             createdAt: DateTime.formatIso(DateTime.nowUnsafe()),
           }),
         );
@@ -7318,7 +7325,7 @@ describe("ProviderCommandReactor", () => {
             text: "Continue the unfinished saved work.",
             attachments: [],
           },
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeRecovery: {
             sourceEventSequence: loss.sequence,
@@ -7489,7 +7496,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: "2026-01-01T00:00:01.000Z",
       }),
     );
@@ -7666,7 +7673,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -7715,7 +7722,7 @@ describe("ProviderCommandReactor", () => {
             subagentRuntimeId: oldId,
             codexContextWindowOverride: 500_000,
             codexAutoCompactTokenLimit: 500_000,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: turnId,
             lastError: null,
             updatedAt: at,
@@ -7733,7 +7740,7 @@ describe("ProviderCommandReactor", () => {
         ...(observedCompaction !== undefined
           ? { codexAutoCompactTokenLimit: observedCompaction }
           : {}),
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         activeTurnId: turnId,
         createdAt: at,
         updatedAt: at,
@@ -7784,7 +7791,7 @@ describe("ProviderCommandReactor", () => {
             subagentRuntimeId: runtimeId,
             codexContextWindowOverride: 800_000,
             codexAutoCompactTokenLimit: 800_000,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: turnId,
             lastError: null,
             updatedAt: at,
@@ -7802,7 +7809,7 @@ describe("ProviderCommandReactor", () => {
         ...(observedCompaction !== undefined
           ? { codexAutoCompactTokenLimit: observedCompaction }
           : {}),
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         activeTurnId: turnId,
         createdAt: at,
         updatedAt: at,
@@ -7845,7 +7852,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: turnId,
           lastError: null,
           updatedAt: startedAt,
@@ -7898,7 +7905,7 @@ describe("ProviderCommandReactor", () => {
             providerName: "codex",
             providerInstanceId: ProviderInstanceId.make("codex"),
             subagentRuntimeId: runtimeId,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: turnId,
             lastError: null,
             updatedAt: at,
@@ -7912,7 +7919,7 @@ describe("ProviderCommandReactor", () => {
           provider: ProviderDriverKind.make("codex"),
           providerInstanceId: ProviderInstanceId.make("codex"),
           status: "running",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           resumeCursor: {},
           lastSeenAt: at,
           runtimePayload: {
@@ -7960,7 +7967,7 @@ describe("ProviderCommandReactor", () => {
             providerName: "codex",
             providerInstanceId: ProviderInstanceId.make("codex"),
             subagentRuntimeId: runtimeId,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
             updatedAt: at,
@@ -7974,7 +7981,7 @@ describe("ProviderCommandReactor", () => {
           provider: ProviderDriverKind.make("codex"),
           providerInstanceId: ProviderInstanceId.make("codex"),
           status: "running",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           resumeCursor: {},
           lastSeenAt: at,
           runtimePayload: { subagentRuntimeId: runtimeId, ...liveDurableRuntimeOwnerPayload() },
@@ -8004,7 +8011,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: turnId,
           lastError: null,
           updatedAt: at,
@@ -8018,7 +8025,7 @@ describe("ProviderCommandReactor", () => {
       threadId,
       subagentRuntimeId: runtimeId,
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       activeTurnId: turnId,
       createdAt: at,
       updatedAt: at,
@@ -8050,7 +8057,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: turnId,
           lastError: null,
           updatedAt: startedAt,
@@ -8063,7 +8070,7 @@ describe("ProviderCommandReactor", () => {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       runtimePayload: { activeTurnId: turnId, ...liveDurableRuntimeOwnerPayload() },
       resumeCursor: { opaque: "resume-detached-codex" },
       lastSeenAt: startedAt,
@@ -8100,7 +8107,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: turnId,
           lastError: null,
           updatedAt: startedAt,
@@ -8113,7 +8120,7 @@ describe("ProviderCommandReactor", () => {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       runtimePayload: {
         activeTurnId: turnId,
         runtimeOwnerId: "00000000-0000-4000-8000-000000000002",
@@ -8156,7 +8163,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: turnId,
           lastError: null,
           updatedAt: startedAt,
@@ -8174,7 +8181,7 @@ describe("ProviderCommandReactor", () => {
           status: "interrupted",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: "Incorrect orphan repair",
           updatedAt: falselyInterruptedAt,
@@ -8208,7 +8215,7 @@ describe("ProviderCommandReactor", () => {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       runtimePayload: { activeTurnId: turnId, ...liveDurableRuntimeOwnerPayload() },
       resumeCursor: { opaque: "resume-still-live" },
       lastSeenAt: falselyInterruptedAt,
@@ -8255,7 +8262,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "grok",
           providerInstanceId: ProviderInstanceId.make("grok"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: turnId,
           lastError: null,
           updatedAt: startedAt,
@@ -8276,7 +8283,7 @@ describe("ProviderCommandReactor", () => {
       provider: ProviderDriverKind.make("grok"),
       providerInstanceId: ProviderInstanceId.make("grok"),
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       threadId,
       activeTurnId: turnId,
       resumeCursor: { opaque: "resume-live-grok" },
@@ -8315,7 +8322,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -8333,13 +8340,13 @@ describe("ProviderCommandReactor", () => {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5-codex",
       },
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
-    expect(thread?.session?.runtimeMode).toBe("approval-required");
+    expect(thread?.session?.runtimeMode).toBe("full-access");
   });
 
   it.each([
@@ -8397,7 +8404,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: "2026-01-01T00:00:00.000Z",
         }),
       );
@@ -8474,7 +8481,7 @@ describe("ProviderCommandReactor", () => {
             attachments,
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: now,
         }),
       );
@@ -8518,7 +8525,7 @@ describe("ProviderCommandReactor", () => {
         threadId: ThreadId.make("thread-1"),
         message: { messageId: commandMessageId, role: "user", text: "/help", attachments: [] },
         axiomCommand: { name: "help" },
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         createdAt: "2026-01-01T00:00:00.000Z",
       }),
@@ -8537,7 +8544,7 @@ describe("ProviderCommandReactor", () => {
         commandId: CommandId.make("first-axiom-model-message"),
         threadId: ThreadId.make("thread-1"),
         message: { messageId, role: "user", text: "Implement the feature.", attachments: [] },
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         createdAt: "2026-01-01T00:00:01.000Z",
       }),
@@ -8573,7 +8580,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -8600,7 +8607,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: "2026-01-01T00:01:00.000Z",
       }),
     );
@@ -8634,7 +8641,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           codexReview,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           createdAt: "2026-01-01T00:00:01.000Z",
         }),
@@ -8667,7 +8674,7 @@ describe("ProviderCommandReactor", () => {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       threadId,
       activeTurnId: asTurnId("existing-native-turn"),
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -8685,7 +8692,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         codexReview: { type: "uncommittedChanges" },
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         createdAt: "2026-01-01T00:00:01.000Z",
       }),
@@ -8725,7 +8732,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         codexReview: { type: "uncommittedChanges" },
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         createdAt: "2026-01-01T00:00:01.000Z",
       }),
@@ -8772,7 +8779,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         codexReview: { type: "uncommittedChanges" },
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         createdAt: "2026-01-01T00:00:01.000Z",
       }),
@@ -8805,7 +8812,7 @@ describe("ProviderCommandReactor", () => {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       threadId,
       activeTurnId: runtimeActiveTurnId,
       resumeCursor: { opaque: "resume-runtime-active" },
@@ -8830,7 +8837,7 @@ describe("ProviderCommandReactor", () => {
           options: [{ id: "reasoningEffort", value: "xhigh" }],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -8885,7 +8892,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -8938,7 +8945,7 @@ describe("ProviderCommandReactor", () => {
           threadId,
           message: { messageId: asMessageId(id), role: "user", text, attachments: [] },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: DateTime.formatIso(
             DateTime.makeUnsafe(Date.parse("2026-01-01T00:00:03.000Z") + ++sendSequence * 1000),
           ),
@@ -8980,7 +8987,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           axiomCommand: { name: "help" },
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           createdAt: "2026-01-01T00:00:03.000Z",
         }),
@@ -9058,7 +9065,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: "2026-01-01T00:00:04.000Z",
         }),
       );
@@ -9180,7 +9187,7 @@ describe("ProviderCommandReactor", () => {
             status: "ready",
             providerName: "codex",
             providerInstanceId: ProviderInstanceId.make("codex"),
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
             updatedAt: "2026-01-01T00:00:03.000Z",
@@ -9221,7 +9228,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           codexReview: { type: "uncommittedChanges" },
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           createdAt: "2026-01-01T00:00:06.000Z",
         }),
@@ -9314,7 +9321,7 @@ describe("ProviderCommandReactor", () => {
           },
           ...(selection !== undefined ? { modelSelection: selection } : {}),
           interactionMode: "default",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: "2026-01-01T00:00:01.000Z",
         }),
       );
@@ -9392,7 +9399,7 @@ describe("ProviderCommandReactor", () => {
             effort: "ultra",
             fastMode: true,
             settingsSource: "submitted",
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             interactionMode: "default",
           },
         },
@@ -9618,7 +9625,7 @@ describe("ProviderCommandReactor", () => {
           },
           titleSeed: seededTitle,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: now,
         }),
       );
@@ -9669,7 +9676,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: "2026-01-01T00:00:00.000Z",
         }),
       );
@@ -9712,7 +9719,7 @@ describe("ProviderCommandReactor", () => {
         },
         titleSeed: seededTitle,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -9757,7 +9764,7 @@ describe("ProviderCommandReactor", () => {
         },
         titleSeed: seededTitle,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -9820,7 +9827,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: now,
         }),
       );
@@ -9869,7 +9876,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required" as const,
+        runtimeMode: "full-access" as const,
         createdAt: "2026-01-01T00:00:00.000Z",
       };
       await Effect.runPromise(harness.engine.dispatch(command));
@@ -9922,7 +9929,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: "2026-01-01T00:00:00.000Z",
         }),
       );
@@ -10004,7 +10011,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: "2026-01-01T00:00:00.000Z",
       }),
     );
@@ -10051,7 +10058,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: "2026-01-01T00:01:00.000Z",
       }),
     );
@@ -10105,7 +10112,7 @@ describe("ProviderCommandReactor", () => {
             title: scenario.name,
             modelSelection: scenario.modelSelection,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             branch: null,
             worktreePath: null,
             createdAt: now,
@@ -10126,7 +10133,7 @@ describe("ProviderCommandReactor", () => {
           },
           modelSelection: scenario.modelSelection,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: now,
         }),
       );
@@ -10143,33 +10150,23 @@ describe("ProviderCommandReactor", () => {
     }
   });
 
-  it("forwards plan interaction mode to the provider turn request", async () => {
+  it("opens and sends Codex turns with the current workflow", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
     await Effect.runPromise(
       harness.engine.dispatch({
-        type: "thread.interaction-mode.set",
-        commandId: CommandId.make("cmd-interaction-mode-set-plan"),
-        threadId: ThreadId.make("thread-1"),
-        interactionMode: "plan",
-        createdAt: now,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
         type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-plan"),
+        commandId: CommandId.make("cmd-turn-start-default-workflow"),
         threadId: ThreadId.make("thread-1"),
         message: {
-          messageId: asMessageId("user-message-plan"),
+          messageId: asMessageId("user-message-default-workflow"),
           role: "user",
-          text: "plan this change",
+          text: "make this change",
           attachments: [],
         },
-        interactionMode: "plan",
-        runtimeMode: "approval-required",
+        interactionMode: "default",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10178,11 +10175,11 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
-      interactionMode: "plan",
+      interactionMode: "default",
     });
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
-      interactionMode: "plan",
+      interactionMode: "default",
     });
   });
 
@@ -10208,7 +10205,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10229,7 +10226,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10268,7 +10265,7 @@ describe("ProviderCommandReactor", () => {
           model: "claude-opus-4-6",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10321,7 +10318,7 @@ describe("ProviderCommandReactor", () => {
           model: "claude-sonnet-4-6",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt,
       }),
     );
@@ -10353,7 +10350,7 @@ describe("ProviderCommandReactor", () => {
           model: "gpt-5.6-sol",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: "2026-01-01T00:00:01.000Z",
       }),
     );
@@ -10433,7 +10430,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10443,7 +10440,7 @@ describe("ProviderCommandReactor", () => {
     // an incidental polling budget for asynchronous local preparation.
     expect(await Effect.runPromise(Deferred.await(opened))).toMatchObject({
       threadId,
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
     expect(await Effect.runPromise(Deferred.await(firstAccepted))).toMatchObject({
       threadId,
@@ -10476,7 +10473,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10521,7 +10518,7 @@ describe("ProviderCommandReactor", () => {
           threadId,
           message: { messageId, role: "user", text: "Held synthetic preparation", attachments: [] },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt: "2026-01-01T00:00:00.000Z",
         }),
       );
@@ -10547,7 +10544,7 @@ describe("ProviderCommandReactor", () => {
     }
     expect(await Effect.runPromise(Deferred.await(opened))).toMatchObject({
       threadId,
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
     expect(await Effect.runPromise(Deferred.await(accepted))).toMatchObject({
       threadId,
@@ -10583,7 +10580,7 @@ describe("ProviderCommandReactor", () => {
           model: "gpt-5-codex",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10607,7 +10604,7 @@ describe("ProviderCommandReactor", () => {
           model: "gpt-5-codex",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: "2026-01-01T00:00:00.000Z",
       }),
     );
@@ -10651,7 +10648,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10687,7 +10684,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10704,7 +10701,7 @@ describe("ProviderCommandReactor", () => {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-sonnet-4-6",
       },
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
   });
 
@@ -10738,7 +10735,7 @@ describe("ProviderCommandReactor", () => {
           [{ id: "effort", value: "medium" }],
         ),
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10770,7 +10767,7 @@ describe("ProviderCommandReactor", () => {
           [{ id: "effort", value: "max" }],
         ),
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10816,7 +10813,7 @@ describe("ProviderCommandReactor", () => {
         },
         modelSelection: initialSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10844,7 +10841,7 @@ describe("ProviderCommandReactor", () => {
         },
         modelSelection: lowerEffortSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10878,7 +10875,7 @@ describe("ProviderCommandReactor", () => {
         },
         modelSelection: changedModelSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -10893,91 +10890,36 @@ describe("ProviderCommandReactor", () => {
     });
     await harness.markThreadReady(undefined, undefined, changedModelTurn);
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.interaction-mode.set",
-        commandId: CommandId.make("cmd-interaction-mode-grok-restart-resume-plan"),
-        threadId: ThreadId.make("thread-1"),
-        interactionMode: "plan",
-        createdAt: now,
-      }),
-    );
-    const planTurn = harness.observeNextProviderTurn(
-      asMessageId("user-message-grok-restart-resume-plan"),
+    // Simulate an idle native owner admitted by a version that still supported Plan.
+    harness.runtimeSessions[0] = { ...harness.runtimeSessions[0]!, interactionMode: "plan" };
+    const currentTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-grok-restart-resume-current-workflow"),
       { opening: true },
     );
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-grok-restart-resume-plan"),
+        commandId: CommandId.make("cmd-turn-start-grok-restart-resume-current-workflow"),
         threadId: ThreadId.make("thread-1"),
         message: {
-          messageId: asMessageId("user-message-grok-restart-resume-plan"),
+          messageId: asMessageId("user-message-grok-restart-resume-current-workflow"),
           role: "user",
-          text: "plan this next",
+          text: "make a change",
           attachments: [],
         },
         modelSelection: changedModelSelection,
-        interactionMode: "plan",
-        runtimeMode: "approval-required",
+        interactionMode: "default",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
     await waitFor(() => harness.startSession.mock.calls.length === 4);
     expect(harness.startSession.mock.calls[3]?.[1]).toMatchObject({
       resumeCursor: { opaque: "resume-1" },
-      interactionMode: "plan",
-      runtimeMode: "approval-required",
+      interactionMode: "default",
+      runtimeMode: "full-access",
     });
-    await waitFor(() => harness.sendTurn.mock.calls.length === 4);
-    await harness.markThreadReady(undefined, undefined, planTurn);
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.interaction-mode.set",
-        commandId: CommandId.make("cmd-interaction-mode-grok-restart-resume-auto"),
-        threadId: ThreadId.make("thread-1"),
-        interactionMode: "auto",
-        createdAt: now,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make("cmd-runtime-mode-grok-restart-resume-auto"),
-        threadId: ThreadId.make("thread-1"),
-        runtimeMode: "auto-accept-edits",
-        createdAt: now,
-      }),
-    );
-    const autoTurn = harness.observeNextProviderTurn(
-      asMessageId("user-message-grok-restart-resume-auto"),
-      { opening: true },
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-grok-restart-resume-auto"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-grok-restart-resume-auto"),
-          role: "user",
-          text: "continue in auto",
-          attachments: [],
-        },
-        modelSelection: changedModelSelection,
-        interactionMode: "auto",
-        runtimeMode: "auto-accept-edits",
-        createdAt: now,
-      }),
-    );
-    await waitFor(() => harness.startSession.mock.calls.length === 5);
-    expect(harness.startSession.mock.calls[4]?.[1]).toMatchObject({
-      resumeCursor: { opaque: "resume-1" },
-      interactionMode: "auto",
-      runtimeMode: "auto-accept-edits",
-    });
-    await autoTurn.waitForRunning();
+    await currentTurn.waitForRunning();
   });
 
   it("starts a fresh provider session without resume state when a thread switches drivers", async () => {
@@ -11005,7 +10947,7 @@ describe("ProviderCommandReactor", () => {
           model: "claude-sonnet-4-6",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -11065,7 +11007,7 @@ describe("ProviderCommandReactor", () => {
           model: "gpt-5.3-codex",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -11081,7 +11023,7 @@ describe("ProviderCommandReactor", () => {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5.3-codex",
       },
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
     expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumeCursor");
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
@@ -11129,7 +11071,7 @@ describe("ProviderCommandReactor", () => {
           status: "ready",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError:
             "Thread 'thread-1' references unknown provider instance 'codex'. The instance is not configured in this build.",
@@ -11151,7 +11093,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -11171,7 +11113,7 @@ describe("ProviderCommandReactor", () => {
           { id: "contextWindow", value: "1m" },
         ],
       },
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
@@ -11184,12 +11126,48 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.lastError).toBeNull();
   });
 
-  it.each([
-    { initialMode: "approval-required", requestedMode: "full-access" },
-    { initialMode: "full-access", requestedMode: "approval-required" },
-  ] as const)(
-    "reconciles native $initialMode before accepting projected $requestedMode intent",
-    async ({ initialMode, requestedMode }) => {
+  it("materializes Gemini Build with native bypass for the exact configured account", async () => {
+    const instanceId = ProviderInstanceId.make("gemini-secondary");
+    const modelSelection = { instanceId, model: "synthetic-gemini-model" };
+    const harness = await createHarness({
+      threadModelSelection: modelSelection,
+      distinctNativeTurns: true,
+    });
+    const threadId = ThreadId.make("thread-1");
+    const messageId = asMessageId("gemini-build-message");
+    const owner = harness.observeNextProviderTurn(messageId, { opening: true });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("gemini-build-default"),
+        threadId,
+        message: { messageId, role: "user", text: "Build", attachments: [] },
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await owner.waitForRunning();
+    expect(harness.startSession).toHaveBeenCalledExactlyOnceWith(
+      threadId,
+      expect.objectContaining({
+        provider: "gemini",
+        providerInstanceId: instanceId,
+        runtimeMode: "full-access",
+        interactionMode: "gemini-bypass",
+      }),
+    );
+    expect(harness.sendTurn).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ threadId, messageId, interactionMode: "gemini-bypass" }),
+    );
+    expect((await harness.readThreadDetail(threadId))?.interactionMode).toBe("default");
+  });
+
+  it.each(["approval-required", "auto-accept-edits"] as const)(
+    "reconciles an existing $0 native owner to Full access before dispatch",
+    async (initialMode) => {
+      const requestedMode = "full-access";
       const harness = await createHarness({
         distinctNativeTurns: true,
         threadModelSelection: {
@@ -11198,17 +11176,6 @@ describe("ProviderCommandReactor", () => {
         },
       });
       const threadId = ThreadId.make("thread-1");
-      // Ordinary turn-start commands retain the saved thread mode. Establish
-      // the initial intent through its public control before opening a query.
-      await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.runtime-mode.set",
-          commandId: CommandId.make("native-mode-initial-policy"),
-          threadId,
-          runtimeMode: initialMode,
-          createdAt: "2026-01-01T00:00:00.000Z",
-        }),
-      );
       const firstMessageId = asMessageId("native-mode-initial-message");
       const firstOwner = harness.observeNextProviderTurn(firstMessageId, {
         threadId,
@@ -11231,7 +11198,24 @@ describe("ProviderCommandReactor", () => {
         }),
       );
       await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z", firstOwner);
-      const originalSession = harness.runtimeSessions[0]!;
+      // Represent the real native owner of an upgraded chat. The desired
+      // projection is already Full access and cannot attest native adoption.
+      const originalSession = { ...harness.runtimeSessions[0]!, runtimeMode: initialMode };
+      harness.runtimeSessions.splice(0, 1, originalSession);
+      const detail = (await harness.readThreadDetail(threadId))!;
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("legacy-native-owner"),
+          threadId,
+          session: {
+            ...detail.session!,
+            runtimeMode: initialMode,
+            updatedAt: "2026-01-01T00:00:02.250Z",
+          },
+          createdAt: "2026-01-01T00:00:02.250Z",
+        }),
+      );
       expect(originalSession).toMatchObject({
         provider: "claudeAgent",
         providerInstanceId: "claudeAgent",
@@ -11241,7 +11225,7 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession.mock.calls).toHaveLength(1);
 
       // A refused materialization preserves the old native owner while the
-      // public mode control durably changes the requested policy. Observe the
+      // desired chat policy is already Full access. Observe the
       // exact failed effect before draining its admitted worker; a mock call
       // alone would precede the failure and cannot qualify this divergence.
       const refusal = new ProviderAdapterRequestError({
@@ -11348,224 +11332,6 @@ describe("ProviderCommandReactor", () => {
     },
   );
 
-  it("restarts the provider session when runtime mode is updated on the thread", async () => {
-    const harness = await createHarness({ distinctNativeTurns: true });
-    const now = "2026-01-01T00:00:00.000Z";
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make("cmd-runtime-mode-set-initial-full-access"),
-        threadId: ThreadId.make("thread-1"),
-        runtimeMode: "full-access",
-        createdAt: now,
-      }),
-    );
-
-    const firstOwner = harness.observeNextProviderTurn(asMessageId("user-message-runtime-mode-1"), {
-      threadId: ThreadId.make("thread-1"),
-      opening: true,
-    });
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-runtime-mode-1"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-runtime-mode-1"),
-          role: "user",
-          text: "first",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "full-access",
-        createdAt: now,
-      }),
-    );
-
-    await harness.markThreadReady(ThreadId.make("thread-1"), now, firstOwner);
-
-    const manualOpening = Effect.runSync(Deferred.make<ProviderSession>());
-    const originalStart = harness.startSession.getMockImplementation()!;
-    harness.startSession.mockImplementationOnce((threadId, request) =>
-      originalStart(threadId, request).pipe(
-        Effect.tap((session) => Deferred.succeed(manualOpening, session)),
-      ),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make("cmd-runtime-mode-set-1"),
-        threadId: ThreadId.make("thread-1"),
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(async () => {
-      const readModel = await harness.readModel();
-      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-      return thread?.runtimeMode === "approval-required";
-    });
-    const manualSession = await harness.awaitOwnedObserver(Deferred.await(manualOpening));
-    expect(manualSession.runtimeMode).toBe("approval-required");
-    await harness.drain();
-    const secondOwner = harness.observeNextProviderTurn(
-      asMessageId("user-message-runtime-mode-2"),
-      { threadId: ThreadId.make("thread-1") },
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-runtime-mode-2"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-runtime-mode-2"),
-          role: "user",
-          text: "second",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "full-access",
-        createdAt: now,
-      }),
-    );
-
-    await secondOwner.waitForRunning();
-
-    expect(harness.stopSession.mock.calls.length).toBe(0);
-    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
-      threadId: ThreadId.make("thread-1"),
-      resumeCursor: { opaque: "resume-1" },
-      runtimeMode: "approval-required",
-    });
-    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
-      threadId: ThreadId.make("thread-1"),
-    });
-    // Turn-start's legacy mode field cannot override the saved Manual policy.
-    // The successful control above already materialized its exact native owner.
-    expect(harness.startSession.mock.calls).toHaveLength(2);
-
-    const readModel = await harness.readModel();
-    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.session?.threadId).toBe("thread-1");
-    expect(thread?.session?.runtimeMode).toBe("approval-required");
-  });
-
-  it("does not inject derived model options when restarting claude on runtime mode changes", async () => {
-    const harness = await createHarness({
-      threadModelSelection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-opus-4-6",
-      },
-    });
-    const now = "2026-01-01T00:00:00.000Z";
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-runtime-mode-claude"),
-        threadId: ThreadId.make("thread-1"),
-        session: {
-          threadId: ThreadId.make("thread-1"),
-          status: "ready",
-          providerName: "claudeAgent",
-          runtimeMode: "full-access",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: now,
-        },
-        createdAt: now,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make("cmd-runtime-mode-set-claude-no-options"),
-        threadId: ThreadId.make("thread-1"),
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.startSession.mock.calls.length === 1);
-
-    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      modelSelection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-opus-4-6",
-      },
-      runtimeMode: "approval-required",
-    });
-  });
-
-  it("does not stop the active session when restart fails before rebind", async () => {
-    const harness = await createHarness();
-    const now = "2026-01-01T00:00:00.000Z";
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make("cmd-runtime-mode-set-initial-full-access-2"),
-        threadId: ThreadId.make("thread-1"),
-        runtimeMode: "full-access",
-        createdAt: now,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-restart-failure-1"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-restart-failure-1"),
-          role: "user",
-          text: "first",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "full-access",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.startSession.mock.calls.length === 1);
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await harness.markThreadReady();
-
-    harness.startSession.mockImplementationOnce(
-      (_: unknown, __: unknown) => Effect.fail("simulated restart failure") as never,
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make("cmd-runtime-mode-set-restart-failure"),
-        threadId: ThreadId.make("thread-1"),
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(async () => {
-      const readModel = await harness.readModel();
-      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-      return thread?.runtimeMode === "approval-required";
-    });
-    await waitFor(() => harness.startSession.mock.calls.length === 2);
-    await harness.drain();
-
-    expect(harness.stopSession.mock.calls.length).toBe(0);
-    expect(harness.sendTurn.mock.calls.length).toBe(1);
-
-    const readModel = await harness.readModel();
-    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.session?.threadId).toBe("thread-1");
-    expect(thread?.session?.runtimeMode).toBe("full-access");
-  });
-
   it("starts a fresh provider session when a bound idle thread switches drivers", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -11582,7 +11348,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -11607,7 +11373,7 @@ describe("ProviderCommandReactor", () => {
           model: "claude-opus-4-6",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -11623,7 +11389,7 @@ describe("ProviderCommandReactor", () => {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-opus-4-6",
       },
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
     expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumeCursor");
     expect(harness.stopSession.mock.calls.length).toBe(0);
@@ -11632,7 +11398,7 @@ describe("ProviderCommandReactor", () => {
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerName).toBe("claudeAgent");
-    expect(thread?.session?.runtimeMode).toBe("approval-required");
+    expect(thread?.session?.runtimeMode).toBe("full-access");
     expect(
       thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
     ).toBe(false);
@@ -11652,7 +11418,7 @@ describe("ProviderCommandReactor", () => {
           status: "stopped",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -11677,7 +11443,7 @@ describe("ProviderCommandReactor", () => {
           model: "claude-opus-4-6",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -11692,7 +11458,7 @@ describe("ProviderCommandReactor", () => {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-opus-4-6",
       },
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
     expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty("resumeCursor");
     const readModel = await harness.readModel();
@@ -11716,7 +11482,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "codex",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: asTurnId("turn-1"),
           lastError: null,
           updatedAt: now,
@@ -11784,7 +11550,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: turnId,
           lastError: null,
           updatedAt: "2026-01-01T00:00:02.000Z",
@@ -11839,7 +11605,7 @@ describe("ProviderCommandReactor", () => {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       threadId,
       activeTurnId: runtimeActiveTurnId,
       resumeCursor: { opaque: "resume-runtime-active" },
@@ -11857,7 +11623,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: projectedTurnId,
           lastError: null,
           updatedAt: now,
@@ -11910,7 +11676,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "codex",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: asTurnId("turn-from-session"),
           lastError: null,
           updatedAt: now,
@@ -11949,7 +11715,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: asTurnId("turn-1"),
           lastError: null,
           updatedAt: now,
@@ -12028,7 +11794,7 @@ describe("ProviderCommandReactor", () => {
         providerName: "claudeAgent",
         providerInstanceId: account,
         status: "running" as const,
-        runtimeMode: "approval-required" as const,
+        runtimeMode: "full-access" as const,
         subagentRuntimeId,
         activeTurnId,
         lastError: null,
@@ -12255,7 +12021,7 @@ describe("ProviderCommandReactor", () => {
           title: "Fresh chat",
           modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
           interactionMode: "default",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
           createdAt,
@@ -12276,7 +12042,7 @@ describe("ProviderCommandReactor", () => {
             attachments: [],
           },
           interactionMode: "default",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           createdAt,
         }),
       );
@@ -12625,7 +12391,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: startedAt,
       }),
     );
@@ -12679,7 +12445,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: newerTurnId,
           lastError: null,
           updatedAt: newerAt,
@@ -12725,7 +12491,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: startedAt,
       }),
     );
@@ -12773,7 +12539,7 @@ describe("ProviderCommandReactor", () => {
           status: "ready",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: "2026-01-01T00:00:02.000Z",
@@ -12840,7 +12606,7 @@ describe("ProviderCommandReactor", () => {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       status: "running",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       runtimePayload: { activeTurnId: staleTurnId, ...liveDurableRuntimeOwnerPayload() },
       resumeCursor: { opaque: "resume-detached-terminal-recovery" },
       lastSeenAt: "2026-01-01T00:00:03.000Z",
@@ -12902,7 +12668,7 @@ describe("ProviderCommandReactor", () => {
           provider: ProviderDriverKind.make("codex"),
           providerInstanceId: ProviderInstanceId.make("codex"),
           status: "running",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           threadId,
           ...(variant === "local-malformed" ? { activeTurnId: "" as TurnId } : {}),
           resumeCursor: { opaque: `resume-${variant}` },
@@ -12915,7 +12681,7 @@ describe("ProviderCommandReactor", () => {
           provider: ProviderDriverKind.make("codex"),
           providerInstanceId: ProviderInstanceId.make("codex"),
           status: "running",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           runtimePayload: {
             ...liveDurableRuntimeOwnerPayload(),
             ...(variant === "durable-malformed" ? { activeTurnId: 42 } : {}),
@@ -13180,7 +12946,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId,
           lastError: null,
           updatedAt: now,
@@ -13360,7 +13126,7 @@ describe("ProviderCommandReactor", () => {
             status: "running",
             providerName: input.driver,
             providerInstanceId: account,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId,
             lastError: null,
             updatedAt: "2026-01-01T00:00:00.000Z",
@@ -13445,7 +13211,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: staleTurnId,
           lastError: null,
           updatedAt: now,
@@ -13572,7 +13338,7 @@ describe("ProviderCommandReactor", () => {
         provider: ProviderDriverKind.make("codex"),
         providerInstanceId: ProviderInstanceId.make("codex"),
         status: "running",
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         runtimePayload: { activeTurnId: rootTurnId, ...liveDurableRuntimeOwnerPayload() },
         resumeCursor: { threadId: providerThreadId },
         lastSeenAt: "2026-01-01T00:00:03.000Z",
@@ -14055,7 +13821,7 @@ describe("ProviderCommandReactor", () => {
           model: "gpt-5-codex",
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         branch: null,
         worktreePath: null,
         createdAt: now,
@@ -14094,7 +13860,7 @@ describe("ProviderCommandReactor", () => {
             status: scenario.status,
             providerName: "codex",
             providerInstanceId: ProviderInstanceId.make("codex"),
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId: null,
             lastError: null,
             updatedAt: now,
@@ -14154,7 +13920,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: staleTurnId,
           lastError: null,
           updatedAt: "2026-01-01T00:00:01.000Z",
@@ -14273,7 +14039,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId,
           lastError: null,
           updatedAt: now,
@@ -14357,7 +14123,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "grok",
           providerInstanceId: ProviderInstanceId.make("grok"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId,
           lastError: null,
           updatedAt: now,
@@ -14449,7 +14215,7 @@ describe("ProviderCommandReactor", () => {
             status: "running",
             providerName: "axiom",
             providerInstanceId: ProviderInstanceId.make("axiom"),
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             activeTurnId,
             lastError: null,
             updatedAt: now,
@@ -14525,7 +14291,7 @@ describe("ProviderCommandReactor", () => {
           status: "running",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: asTurnId("turn-1"),
           lastError: null,
           updatedAt: now,
@@ -14579,7 +14345,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "ready",
           providerName: "codex",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -14600,7 +14366,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -14614,7 +14380,7 @@ describe("ProviderCommandReactor", () => {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5-codex",
       },
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
     });
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
@@ -14634,7 +14400,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "ready",
           providerName: "codex",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -14645,7 +14411,7 @@ describe("ProviderCommandReactor", () => {
     harness.runtimeSessions.push({
       provider: ProviderDriverKind.make("codex"),
       status: "ready",
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       threadId: ThreadId.make("thread-1"),
       cwd: "/tmp/provider-project",
       resumeCursor: { opaque: "resume-without-instance" },
@@ -14665,7 +14431,7 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
+        runtimeMode: "full-access",
         createdAt: now,
       }),
     );
@@ -14708,7 +14474,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "codex",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -14749,7 +14515,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "codex",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -14852,7 +14618,7 @@ describe("ProviderCommandReactor", () => {
               threadId: ThreadId.make("thread-1"),
               status: "running",
               providerName: "codex",
-              runtimeMode: "approval-required",
+              runtimeMode: "full-access",
               activeTurnId: null,
               lastError: null,
               updatedAt: now,
@@ -15102,7 +14868,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "codex",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -15151,7 +14917,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "codex",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -15246,7 +15012,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "running",
           providerName: "claudeAgent",
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -15347,7 +15113,7 @@ describe("ProviderCommandReactor", () => {
           status: "ready",
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex_work"),
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,
           updatedAt: now,
@@ -15373,5 +15139,148 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+  });
+
+  it("does not reopen a fast-settled Gemini turn back to running when sendTurn resolves after completion", async () => {
+    const geminiInstanceId = ProviderInstanceId.make("gemini");
+    const threadId = ThreadId.make("thread-1");
+    const turnId = TurnId.make("gemini-fast-turn");
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: geminiInstanceId,
+        model: "gemini-4-neon",
+      },
+      liveSteer: "supported",
+    });
+    const now = "2030-01-01T00:00:00.000Z";
+    const completedAt = "2030-01-01T00:00:01.000Z";
+    const settledInSendTurn = Effect.runSync(Deferred.make<void>());
+
+    harness.startSession.mockImplementationOnce((_, input) =>
+      Effect.sync(() => {
+        const session = {
+          provider: ProviderDriverKind.make("gemini"),
+          providerInstanceId: geminiInstanceId,
+          status: "ready" as const,
+          threadId: input.threadId,
+          runtimeMode: input.runtimeMode,
+          interactionMode: "gemini-bypass" as const,
+          model: "gemini-4-neon",
+          cwd: input.cwd ?? "/tmp/workspace",
+          createdAt: now,
+          updatedAt: now,
+        };
+        const existingIndex = harness.runtimeSessions.findIndex(
+          (entry) => entry.threadId === input.threadId,
+        );
+        if (existingIndex >= 0) {
+          harness.runtimeSessions.splice(existingIndex, 1, session);
+        } else {
+          harness.runtimeSessions.push(session);
+        }
+        return session;
+      }),
+    );
+
+    harness.sendTurn.mockImplementationOnce((input) =>
+      Effect.gen(function* () {
+        // Simulate Gemini emitting turn.started and turn.completed and settling
+        // its live session to ready before the sendTurn ACK returns.
+        const settledSession = {
+          provider: ProviderDriverKind.make("gemini"),
+          providerInstanceId: geminiInstanceId,
+          status: "ready" as const,
+          threadId: input.threadId,
+          runtimeMode: "full-access" as const,
+          interactionMode: "gemini-bypass" as const,
+          model: "gemini-4-neon",
+          cwd: "/tmp/workspace",
+          createdAt: now,
+          updatedAt: completedAt,
+        };
+        const existingIndex = harness.runtimeSessions.findIndex(
+          (entry) => entry.threadId === input.threadId,
+        );
+        if (existingIndex >= 0) {
+          harness.runtimeSessions.splice(existingIndex, 1, settledSession);
+        } else {
+          harness.runtimeSessions.push(settledSession);
+        }
+        yield* harness.engine
+          .dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-gemini-fast-started"),
+            threadId: input.threadId,
+            session: {
+              threadId: input.threadId,
+              status: "running",
+              providerName: "gemini",
+              providerInstanceId: geminiInstanceId,
+              runtimeMode: "full-access",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          })
+          .pipe(Effect.orDie);
+        yield* harness.engine
+          .dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-gemini-fast-completed"),
+            threadId: input.threadId,
+            session: {
+              threadId: input.threadId,
+              status: "ready",
+              providerName: "gemini",
+              providerInstanceId: geminiInstanceId,
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: completedAt,
+            },
+            createdAt: completedAt,
+          })
+          .pipe(Effect.orDie);
+        yield* Deferred.succeed(settledInSendTurn, undefined);
+        return { threadId: input.threadId, turnId };
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-gemini-fast-turn-start"),
+        threadId,
+        message: {
+          messageId: MessageId.make("msg-gemini-fast"),
+          role: "user",
+          text: "quick answer",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: geminiInstanceId,
+          model: "gemini-4-neon",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(Deferred.await(settledInSendTurn));
+    await waitFor(async () => {
+      const detail = await harness.readThreadDetail(threadId);
+      return detail?.latestTurn?.turnId === turnId && detail.latestTurn.state === "completed";
+    });
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("ready");
+    expect(thread?.session?.activeTurnId).toBeNull();
+    expect(thread?.latestTurn).toMatchObject({
+      turnId,
+      state: "completed",
+    });
   });
 });
